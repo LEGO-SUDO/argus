@@ -1,0 +1,14 @@
+# One-shot Redpanda topic bootstrap.
+#
+# We reuse the official redpanda image (which ships `rpk`) and bake the
+# topic-creation script into it. The compose service runs this image once,
+# waits for redpanda to be healthy, creates the `traces` topic, then exits.
+FROM redpandadata/redpanda:v24.2.13
+
+USER root
+COPY topics.sh /usr/local/bin/topics.sh
+RUN chmod +x /usr/local/bin/topics.sh
+
+# Don't run the redpanda broker — just the bootstrap script.
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["/usr/local/bin/topics.sh"]
