@@ -1,7 +1,7 @@
 ---
 phase: lld
 status: APPROVED
-revision: 3
+revision: 4
 slug: argus
 scope: phase-b
 workstream: backend-infra
@@ -16,10 +16,10 @@ updated: 2026-05-25
 
 Scope of this LLD: the ingestion-and-persistence extensions required by Phase B's `/console` reads, plus the new post-commit live-events publisher. Specifically:
 
-- Prisma migration `0003_phase_b_kind_enum` that adds the `kind` enum column to `inferences` (`chat | classifier | replay | sample | heartbeat | unknown`, default `chat`), three new FKs on `inferences` (`classifier_for_message_id` → messages, `replay_of_inference_id` self-FK, `sample_workspace_id` → sample_workspaces), the `current_sample_workspace_id` pointer on `sessions`, two new tables (`sample_workspaces`, `user_clear_fences`), the supporting indexes, and adds the `updated_at` column on `inferences` that the janitor predicate (HLD D9) and the api stream-progress tick rely on.
+- Prisma migration `0003_phase_b_kind_enum` that adds the `kind` enum column to `inferences` (`chat | classifier | replay | sample | heartbeat | unknown`, default `chat`), three new FKs on `inferences` (`classifier_for_message_id` → messages, `replay_of_inference_id` self-FK, `sample_workspace_id` → sample_workspaces), the `current_sample_workspace_id` pointer on `sessions`, two new tables (`sample_workspaces`, `user_clear_fences`), the supporting indexes, and adds the `updated_at` column on `inferences` that the janitor predicate (HLD D9) and the api stream-progress tick rely on. The same migration also DROPs the existing `trace_events` `UNIQUE(trace_id, span_id)` constraint and ADDs `UNIQUE(trace_id, span_id, name)` so a single span can persist multiple named events (e.g. `llm.input` + `llm.output`) on first delivery while preserving redelivery idempotency (a redelivered span repeats identical tuples and still hits P2002 on its first event).
 - Projection consumer extensions in `apps/workers/src/projection/`: (a) `span-mapper.ts` reads `llm.kind`, `llm.sample_workspace_id`, `llm.replay_of_inference_id`, `llm.classifier_for_message_id` from span attributes and writes them to the corresponding `inferences` columns, mapping unrecognized `llm.kind` values to `unknown` (HLD §Regression Risk + §Forward-Compat Locks); (b) a new clear-fence enforcement step in `projection.service.ts` that drops spans where `span.startedAt < user.clearAfterTs`; (c) a new `live-events` publisher invoked AFTER each successful Postgres commit (HLD D3), with snake_case payload fields per the contract.
 - Infra: a new Kafka topic `live-events` added to the Redpanda bootstrap script. NO new compose services — Redis remains deferred (HLD §Component Map).
-- Heartbeat ingestion path: regression-test that the existing `(trace_id, span_id)` unique index continues to dedupe high-frequency heartbeat spans (HLD §Regression Risk).
+- Heartbeat ingestion path: regression-test that the `(trace_id, span_id, name)` unique index (widened in migration `0003`) continues to dedupe high-frequency heartbeat spans (HLD §Regression Risk); the dedup still holds because redelivered heartbeat spans repeat identical `(trace_id, span_id, name)` tuples.
 - Sample data ingestion path: regression-test that sample spans flow through the exact same consumer code as chat spans, tagged correctly via `llm.kind=sample` and `llm.sample_workspace_id` (HLD D5).
 
 **Explicitly out of scope for this LLD (other workstreams):**
@@ -110,7 +110,7 @@ Per HLD §Forward-Compat Locks the consumer maps any unrecognized `llm.kind` att
 
 ### Heartbeat ingestion idempotency — regression risk acknowledgement
 
-Heartbeat spans arrive at high frequency (per HLD D6 the api emits at a fixed cadence; LLD-time the api owns the actual interval). The existing `UNIQUE(trace_id, span_id)` index on `trace_events` continues to be the idempotency primitive. Tasks 31/32 below are a regression pair that fires a burst of heartbeat spans with duplicate redeliveries and asserts the row counts match the unique-span count, AND that exactly that many `live-events` messages were published (not one per redelivery). No change to the consumer's idempotency code path — the tests exist specifically to prove the regression risk does not materialize.
+Heartbeat spans arrive at high frequency (per HLD D6 the api emits at a fixed cadence; LLD-time the api owns the actual interval). The `UNIQUE(trace_id, span_id, name)` index on `trace_events` (widened in migration `0003` per Tasks 5a/5b) continues to be the idempotency primitive. The wider key still dedupes redeliveries — a redelivered span repeats the same `(trace_id, span_id, name)` tuples, so its first event hits P2002 and the consumer short-circuits — while correctly allowing multiple distinct named events per span on first delivery. Tasks 31/32 below are a regression pair that fires a burst of heartbeat spans with duplicate redeliveries and asserts the row counts match the unique-span count, AND that exactly that many `live-events` messages were published (not one per redelivery). No change to the consumer's idempotency code path — the tests exist specifically to prove the regression risk does not materialize.
 
 ### Sample ingestion path — no parallel write code
 
@@ -123,6 +123,8 @@ The HLD locked the `live-events` payload as `{ user_id, kind, conversation_id }`
 ## Tasks
 
 Task numbering convention: RED tasks pair with the immediately following GREEN task. Schema, infra, and module-wiring tasks are labelled `[non-TDD — <reason>]`. Regression tests verifying a prior GREEN are labelled `[regression — verifies preceding GREEN]`.
+
+**Pre-existing baseline (read before building):** 3 integration tests in `apps/workers/test/projection.service.integration.test.ts` (enriches-placeholder, idempotent-under-duplicate, redelivery-short-circuits) fail at baseline because the current `(trace_id, span_id)` constraint blocks multi-event spans (the span-mapper writes one `trace_events` row per span event, so the 2nd event of every span violates the old 2-column unique). The constraint-widening GREEN task (Task 5b below) turns them green. The builder should run that suite after the `0003` migration lands and confirm all three pass — they are NOT new-work failures.
 
 ---
 
@@ -186,6 +188,24 @@ Task numbering convention: RED tasks pair with the immediately following GREEN t
 **What to do:** Add a new Prisma enum model named `InferenceKind` with six values (chat | classifier | replay | sample | heartbeat | unknown) and `@@map("inference_kind")` so the underlying Postgres type is `inference_kind`. Add a `kind` field of type `InferenceKind` with default `chat` to the `Inference` model with `@map("kind")`. Generate the migration via `prisma migrate dev --name phase_b_kind_enum --create-only` against a throwaway local Postgres; commit `migration.sql`. The migration must declare a CREATE TYPE for the Postgres enum named `inference_kind`, and ALTER the `inferences` table to add a NOT NULL `kind` column of that enum type with default `'chat'`.
 **Acceptance:** Task 4 test passes with both assertions holding simultaneously — the Postgres catalog type name is `inference_kind` AND the Prisma model name (visible in the generated client types) is `InferenceKind`. Both must be true, NOT either-or. `prisma format` rewrites with no diff; `prisma validate` exits 0.
 **Verify:** `pnpm --filter @argus/db exec prisma format && pnpm --filter @argus/db exec prisma validate && pnpm --filter @argus/db test test/schema-phase-b.test.ts`.
+
+---
+
+### Task 5a (RED): Failing integration test — a single span persists BOTH of its named events
+
+**Files:** `packages/db/test/trace-events-multi-event.test.ts` (new file)
+**What to do:** Using the Task 1a harness, write a failing integration test that inserts two `trace_events` rows for ONE span — same `trace_id` and `span_id`, different `name` (`llm.input` and `llm.output`) — and asserts both rows persist. With the Phase A `(trace_id, span_id)` unique constraint the second insert is rejected and only one row survives, so the test fails at baseline. (This is the same behavior the three `apps/workers` integration tests in the Pre-existing baseline note exercise; this db-package test is the local guard for the constraint shape.) Name the behavior ("a single span with two distinct event names persists both trace_events rows").
+**Acceptance:** Test exists, runs, and fails because the old 2-column unique blocks the second event row (only one row found instead of two).
+**Verify:** `pnpm --filter @argus/db test test/trace-events-multi-event.test.ts` fails with the expected reason.
+
+---
+
+### Task 5b (GREEN): Widen the `trace_events` unique to `(trace_id, span_id, name)` and amend the Phase B migration
+
+**Files:** `packages/db/prisma/schema.prisma`, `packages/db/prisma/migrations/0003_phase_b_kind_enum/migration.sql`
+**What to do:** Change the `TraceEvent` model's `@@unique([traceId, spanId])` to `@@unique([traceId, spanId, name])`. Regenerate the migration so it DROPs the existing `trace_events_trace_id_span_id_key` constraint and ADDs the 3-column unique on `(trace_id, span_id, name)`. Apply via `prisma migrate dev`. The widening allows the legitimate multi-event-per-span case on first delivery while a redelivered span (repeating identical tuples) still collides on its first event, preserving the idempotency gate.
+**Acceptance:** Task 5a passes (both event rows persist); the three `apps/workers` baseline integration tests now pass; Tasks 4/5 still pass; `prisma validate` exits 0.
+**Verify:** `pnpm --filter @argus/db test test/trace-events-multi-event.test.ts && pnpm --filter @argus/workers test test/projection.service.integration.test.ts`.
 
 ---
 
@@ -420,7 +440,7 @@ Task numbering convention: RED tasks pair with the immediately following GREEN t
 **What to do:** Add a failing integration test with three observable assertions:
 - (a) Order: invoke handle on a fresh span; assert via call-order spy that the publish call happens AFTER the prisma transaction callback resolves.
 - (b) DB failure: configure prisma to throw inside the transaction; assert publish is NEVER called.
-- (c) Duplicate redelivery: invoke handle twice on the same span (same trace_id + span_id). Assert exactly ONE inference row exists (idempotency holds) AND exactly ONE publish call was made (NOT two — the publisher must not fire on the redelivery that was filtered by the trace_events unique index).
+- (c) Duplicate redelivery: invoke handle twice on the same span (the redelivery repeats identical `(trace_id, span_id, name)` tuples, so it still collides under the widened unique). Assert exactly ONE inference row exists (idempotency holds) AND exactly ONE publish call was made (NOT two — the publisher must not fire on the redelivery that was filtered by the trace_events unique index).
 Name the behaviors ("publish happens after commit", "no publish on DB failure", "no publish on duplicate redelivery").
 **Acceptance:** Case fails because `projection.service.ts` does not yet integrate the publisher with these guards.
 **Verify:** `pnpm --filter @argus/workers test test/projection.service.integration.test.ts` fails on the new cases.

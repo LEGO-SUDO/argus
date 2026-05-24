@@ -5,7 +5,7 @@ slug: argus
 scope: phase-b
 created: 2026-05-25
 updated: 2026-05-25
-revision: 3
+revision: 4
 ---
 
 # HLD: Argus — Phase B (Control Plane)
@@ -101,7 +101,7 @@ Phase B turns Phase A's captured inference stream into the reviewer-facing conso
 
 - **Backend:** Auto routing must not bypass the gateway's cancel/persist path. Janitor must not run before Postgres migrations apply on boot. SSE fan-out must debounce per-stream so a Generate-Samples burst doesn't trigger a refetch storm.
 - **Shared contracts:** `kind` enum is additive but the projection consumer must map any unrecognized `llm.kind` to `unknown` (NOT `chat`) so version skew is visible in ops dashboards and never silently corrupts aggregates.
-- **Projection consumer:** existing `(trace_id, span_id)` idempotency must hold for heartbeat spans; new clear-fence check adds a per-row lookup — verify it stays cheap with an index on `user_clear_fences(user_id)`. New `live-events` publish must occur only after successful row commit.
+- **Projection consumer:** existing `(trace_id, span_id, name)` idempotency must hold for heartbeat spans — the Phase B backend-infra migration widens Phase A's `(trace_id, span_id)` constraint to a 3-column unique to support multi-event spans while preserving redelivery dedup (a redelivered span repeats identical tuples). New clear-fence check adds a per-row lookup — verify it stays cheap with an index on `user_clear_fences(user_id)`. New `live-events` publish must occur only after successful row commit.
 - **Heartbeat storage:** Traces reads must include `WHERE kind != 'heartbeat'` everywhere or the feed bloats with health pings. Centralize in the aggregates helper.
 - **Aggregates:** every default read filters on the `kind` enum (excluding `replay`, `sample` not-in-session, `heartbeat`, and `unknown` via existing equality filters); missing the filter in one place is the most likely regression vector.
 - **Frontend-web:** SSE reconnect must not duplicate refetch storms; `/chat` WS reconnect logic is the reference. `Last-Event-ID` semantics are an LLD decision.
