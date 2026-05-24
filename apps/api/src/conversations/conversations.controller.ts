@@ -31,6 +31,7 @@ import {
   HttpCode,
   HttpStatus,
   Inject,
+  Logger,
   NotFoundException,
   Param,
   Patch,
@@ -88,6 +89,8 @@ function toMessageDto(row: MessageRow): MessageListResponse['messages'][number] 
 @Controller('conversations')
 @UseGuards(SessionGuard)
 export class ConversationsController {
+  private readonly logger = new Logger(ConversationsController.name);
+
   constructor(
     private readonly conversations: ConversationsRepository,
     private readonly messages: MessagesRepository,
@@ -130,14 +133,18 @@ export class ConversationsController {
         error: { code: 'invalid_request', message: parsed.error.issues[0]?.message ?? 'Invalid request body' },
       });
     }
-    // chat-context-and-ux-polish LLD Task 79 — validate non-null pins against
-    // the LIVE catalog BEFORE persisting (no partial writes on rejection).
-    // The schema only enforces the coupling rule; the catalog check rejects
-    // pairs that aren't actually offered by any configured adapter.
+    // chat-context-and-ux-polish LLD Task 79 (Codex review #2) — validate
+    // non-null pins against the LIVE picker catalog (`listConfiguredProviders`)
+    // BEFORE persisting (no partial writes on rejection). The previous
+    // implementation used `getCatalogEntry` (cost.ts pricebook) which accepts
+    // any pricebook-known model regardless of whether the provider's API key
+    // is actually configured — a pin to e.g. `openai:gpt-4o-mini` was accepted
+    // even when OPENAI_API_KEY was unset. The picker UI uses
+    // `listConfiguredProviders` (which gates by `isConfigured()` + the
+    // MOCK_PROVIDER toggle), so this is the right source of truth.
     const patch = parsed.data;
     if (patch.pinnedProvider && patch.pinnedModel) {
-      const entry = this.catalog.getCatalogEntry(patch.pinnedProvider, patch.pinnedModel);
-      if (!entry) {
+      if (!isInLiveCatalog(this.catalog, patch.pinnedProvider, patch.pinnedModel)) {
         throw new BadRequestException({
           error: {
             code: 'invalid_pin',
@@ -192,21 +199,28 @@ export class ConversationsController {
     // common/token-heuristic (oldest-first drop, default budget 10000).
     const omittedCount = computeOmittedCount(rows);
 
-    // chat-context-and-ux-polish LLD Task 89 — read-time pin-fallback
-    // resolver. Persisted pin no longer in the live catalog → response DTO
-    // shows null pin + `pinFallback: true` + `previouslyPinned`. Persisted
-    // row is NOT mutated; the next PATCH (clear or pick anew) writes.
+    // chat-context-and-ux-polish LLD Task 89 (Codex review #2/#3) — read-time
+    // pin-fallback resolver. Persisted pin no longer in the LIVE picker
+    // catalog (`listConfiguredProviders` — same source the picker UI shows,
+    // gates by `isConfigured()` + MOCK_PROVIDER) → response DTO shows null
+    // pin + `pinFallback: true` + `previouslyPinned`. Persisted row is NOT
+    // mutated; the next PATCH (clear or pick anew) writes.
     let pinFallback = false;
     let previouslyPinned: PreviouslyPinned | undefined;
     let conversationForDto = conv;
     if (conv.pinnedProvider && conv.pinnedModel) {
-      const entry = this.catalog.getCatalogEntry(conv.pinnedProvider, conv.pinnedModel);
-      if (!entry) {
+      if (!isInLiveCatalog(this.catalog, conv.pinnedProvider, conv.pinnedModel)) {
         pinFallback = true;
         previouslyPinned = {
           provider: conv.pinnedProvider,
           model: conv.pinnedModel,
         };
+        // HLD §Observability — structured pin-fallback event (queryable in
+        // Jaeger/log search). Emitted only on the fallback transition; non-
+        // fallback reads stay silent so the dashboard count is meaningful.
+        this.logger.warn(
+          `conversation.pin.fallback conversationId=${id} previousProvider=${conv.pinnedProvider} previousModel=${conv.pinnedModel}`,
+        );
         // Effective view: null pins on the DTO so the picker doesn't render
         // a stale pin. The row itself stays put — explicit re-PATCH is the
         // only writer.
@@ -236,17 +250,13 @@ export class ConversationsController {
       });
     }
 
-    // We surface the conversation's *effective* DTO on the response root
-    // ... wait — MessageListResponse historically didn't include the
-    // conversation DTO. The fallback signals (pinFallback + previouslyPinned)
-    // live at the root; the picker reads them alongside the list. The
-    // mutated conversationForDto is here so callers that later swap the
-    // controller's conv read can use the same effective view; for the
-    // current wire shape it's a no-op carry. Reference acknowledged
-    // inline so a future reviewer doesn't think it's dead code.
-    void conversationForDto;
-
+    // chat-context-and-ux-polish LLD Task 86 (Codex review #6) — surface the
+    // conversation DTO on the response root using the EFFECTIVE view (the
+    // mutated `conversationForDto`). When a pin falls back, the DTO carries
+    // both pin fields as null so the picker doesn't render the dropped pair.
+    // The persisted row stays put; only the wire representation is patched.
     return {
+      conversation: toConversationDto(conversationForDto),
       messages: rows.map(toMessageDto),
       ...(omittedCount > 0 ? { omittedCount } : {}),
       ...(tokensUsed !== undefined ? { tokensUsed } : {}),
@@ -255,4 +265,20 @@ export class ConversationsController {
       ...(previouslyPinned ? { previouslyPinned } : {}),
     };
   }
+}
+
+/**
+ * Validate a (provider, model) pair against the LIVE picker catalog (the same
+ * source the picker UI consults via `GET /providers`). Both the PATCH-time
+ * validator and the read-time fallback resolver use this — the catalog gates
+ * by `isConfigured()` + the MOCK_PROVIDER toggle, so a pricebook-known
+ * provider with no API key is correctly rejected here.
+ */
+function isInLiveCatalog(
+  catalog: SdkCatalogAccessor,
+  provider: string,
+  model: string,
+): boolean {
+  const live = catalog.listConfiguredProviders();
+  return live.some((entry) => entry.provider === provider && entry.model === model);
 }

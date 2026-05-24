@@ -20,10 +20,35 @@ import { createInMemoryPrisma, InMemoryPrisma } from '../fixtures/prisma-test-cl
 import { randomUUID } from 'crypto';
 import type { AuthenticatedRequest } from '../../src/auth/session.guard';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import type { ConfiguredProviderEntry } from '@argus/sdk';
 
 interface BuildOptions {
   catalog?: Partial<SdkCatalogAccessor>;
   meterOverride?: ContextMeterService;
+}
+
+/**
+ * chat-context-and-ux-polish (Codex review #2/#5) — pin validation + fallback
+ * resolution now check the LIVE picker catalog (`listConfiguredProviders`),
+ * NOT the cost.ts pricebook (`getCatalogEntry`). This helper builds a stub
+ * that surfaces the given (provider, model) pairs as configured entries so
+ * the tests exercise the same source the controller does.
+ */
+function liveCatalogWith(pairs: Array<[string, string]>): Partial<SdkCatalogAccessor> {
+  const entries: ConfiguredProviderEntry[] = pairs.map(([provider, model]) => ({
+    provider: provider as ConfiguredProviderEntry['provider'],
+    model,
+    promptPerMillion: 0,
+    completionPerMillion: 0,
+    contextWindow: 8192,
+  }));
+  return {
+    listConfiguredProviders: () => entries,
+    // getCatalogEntry intentionally diverges from the live list — it returns
+    // an entry for ANY pair so that a test which relied on it (the old buggy
+    // path) would PASS, proving the controller now uses the live list instead.
+    getCatalogEntry: () => ({ promptPerMillion: 0, completionPerMillion: 0, contextWindow: 8192 }),
+  };
 }
 
 interface BuildResult {
@@ -120,20 +145,9 @@ describe('ConversationsController.listMessages — omittedCount (pre-backbone)',
 
 // chat-context-and-ux-polish LLD Tasks 76-79 — PATCH pin handler.
 describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
-  function catalogWith(pairs: Array<[string, string]>): Partial<SdkCatalogAccessor> {
-    return {
-      getCatalogEntry: (provider, model) => {
-        const found = pairs.some(([p, m]) => p === provider && m === model);
-        return found
-          ? { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 8192 }
-          : null;
-      },
-    };
-  }
-
-  it('accepts a valid pin pair (both in the catalog) and persists', async () => {
+  it('accepts a valid pin pair (both in the live catalog) and persists', async () => {
     const { controller, prisma } = build(createInMemoryPrisma(), {
-      catalog: catalogWith([['anthropic', 'claude-haiku-4-5']]),
+      catalog: liveCatalogWith([['anthropic', 'claude-haiku-4-5']]),
     });
     const { userId, conversationId } = await seedConv(prisma);
     const dto = await controller.update(req(userId), conversationId, {
@@ -149,7 +163,7 @@ describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
 
   it('clears the pin when both fields are null', async () => {
     const { controller, prisma } = build(createInMemoryPrisma(), {
-      catalog: catalogWith([['mock', 'mock-1']]),
+      catalog: liveCatalogWith([['mock', 'mock-1']]),
     });
     const { userId, conversationId } = await seedConv(prisma, {
       pinnedProvider: 'mock',
@@ -168,7 +182,7 @@ describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
 
   it('updates title + pin together in one round-trip', async () => {
     const { controller, prisma } = build(createInMemoryPrisma(), {
-      catalog: catalogWith([['openai', 'gpt-4o-mini']]),
+      catalog: liveCatalogWith([['openai', 'gpt-4o-mini']]),
     });
     const { userId, conversationId } = await seedConv(prisma);
     const dto = await controller.update(req(userId), conversationId, {
@@ -182,8 +196,8 @@ describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
 
   it('rejects a pin whose model is not in the live catalog with 400/invalid_pin', async () => {
     const { controller, prisma } = build(createInMemoryPrisma(), {
-      // Only mock:mock-1 is in the catalog.
-      catalog: catalogWith([['mock', 'mock-1']]),
+      // Only mock:mock-1 is in the live catalog.
+      catalog: liveCatalogWith([['mock', 'mock-1']]),
     });
     const { userId, conversationId } = await seedConv(prisma);
     await expect(
@@ -198,11 +212,46 @@ describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
     expect(row?.pinnedModel).toBeNull();
   });
 
-  it('rejects with invalid_pin when the provider is not configured (catalog has no entries)', async () => {
-    const { controller } = build(createInMemoryPrisma(), {
-      catalog: catalogWith([]),
+  // chat-context-and-ux-polish (Codex finding #5) — the load-bearing case. A
+  // provider whose model IS in the cost.ts pricebook (getCatalogEntry returns
+  // an entry) but is NOT in the live picker catalog (its API key is not
+  // configured) MUST be rejected. The liveCatalogWith stub returns a non-null
+  // getCatalogEntry for everything, so a controller that still validated
+  // against the pricebook would WRONGLY accept this pin — this test fails on
+  // the old behavior and passes on the new.
+  it('rejects a pricebook-known but UNCONFIGURED provider (live catalog omits it) with 400/invalid_pin', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      // Live catalog has ONLY mock — e.g. MOCK_PROVIDER=true, no real keys.
+      catalog: liveCatalogWith([['mock', 'mock-1']]),
     });
-    const { userId, conversationId } = await seedConv(createInMemoryPrisma());
+    const { userId, conversationId } = await seedConv(prisma);
+    try {
+      // openai:gpt-4o-mini is a real pricebook entry (getCatalogEntry !== null)
+      // but absent from the live list.
+      await controller.update(req(userId), conversationId, {
+        pinnedProvider: 'openai',
+        pinnedModel: 'gpt-4o-mini',
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      const resp = (err as BadRequestException).getResponse() as {
+        error?: { code?: string };
+      };
+      expect(resp.error?.code).toBe('invalid_pin');
+    }
+    // No partial write.
+    const row = prisma.conversations.find((c) => c.id === conversationId);
+    expect(row?.pinnedProvider).toBeNull();
+  });
+
+  it('rejects with invalid_pin when the provider is not configured (catalog has no entries)', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      catalog: liveCatalogWith([]),
+    });
+    const { userId, conversationId } = await seedConv(prisma);
     try {
       await controller.update(req(userId), conversationId, {
         pinnedProvider: 'anthropic',
@@ -215,6 +264,51 @@ describe('ConversationsController.update — pin PATCH (Tasks 76-79)', () => {
         error?: { code?: string };
       };
       expect(resp.error?.code).toBe('invalid_pin');
+    }
+  });
+
+  // chat-context-and-ux-polish (Codex review — asymmetric/empty-mix negative
+  // case). Schema-level coupling rejection surfaces `invalid_request`, NOT
+  // `invalid_pin` — the request never reaches the catalog check.
+  it('rejects an asymmetric pin (only provider) with 400/invalid_request before any catalog check', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      catalog: liveCatalogWith([['openai', 'gpt-4o-mini']]),
+    });
+    const { userId, conversationId } = await seedConv(prisma);
+    try {
+      await controller.update(req(userId), conversationId, {
+        pinnedProvider: 'openai',
+        // pinnedModel omitted → coupling violation.
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      const resp = (err as BadRequestException).getResponse() as {
+        error?: { code?: string };
+      };
+      expect(resp.error?.code).toBe('invalid_request');
+    }
+  });
+
+  it('rejects a null/string-mix pin with 400/invalid_request (coupling violation)', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      catalog: liveCatalogWith([['openai', 'gpt-4o-mini']]),
+    });
+    const { userId, conversationId } = await seedConv(prisma);
+    try {
+      await controller.update(req(userId), conversationId, {
+        pinnedProvider: 'openai',
+        pinnedModel: null,
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      const resp = (err as BadRequestException).getResponse() as {
+        error?: { code?: string };
+      };
+      expect(resp.error?.code).toBe('invalid_request');
     }
   });
 
@@ -314,8 +408,8 @@ describe('ConversationsController.listMessages — pin fallback resolver (Tasks 
   it('persisted pin missing from the live catalog → response shows pinFallback true + previouslyPinned, conversation row UNCHANGED', async () => {
     const prisma = createInMemoryPrisma();
     const { controller } = build(prisma, {
-      // Empty catalog: any persisted pin will look dropped.
-      catalog: { getCatalogEntry: () => null },
+      // Empty live catalog: any persisted pin will look dropped.
+      catalog: liveCatalogWith([]),
     });
     const { userId, conversationId } = await seedConv(prisma, {
       pinnedProvider: 'openai',
@@ -327,6 +421,9 @@ describe('ConversationsController.listMessages — pin fallback resolver (Tasks 
       provider: 'openai',
       model: 'gpt-unicorn-9000',
     });
+    // The effective conversation DTO carries null pins (Task 86).
+    expect(res.conversation?.pinnedProvider).toBeNull();
+    expect(res.conversation?.pinnedModel).toBeNull();
     // Persisted columns NOT mutated.
     const row = prisma.conversations.find((c) => c.id === conversationId);
     expect(row?.pinnedProvider).toBe('openai');
@@ -340,15 +437,35 @@ describe('ConversationsController.listMessages — pin fallback resolver (Tasks 
     });
   });
 
+  // chat-context-and-ux-polish (Codex finding #2/#5) — fallback resolution
+  // uses the LIVE catalog too. A persisted pin whose provider/model IS in the
+  // cost.ts pricebook but is NOT in the live picker catalog (key not
+  // configured) MUST fall back. The liveCatalogWith stub returns a non-null
+  // getCatalogEntry for everything, so a resolver still checking the pricebook
+  // would WRONGLY treat this pin as live (no fallback) — this fails on the old
+  // behavior and passes on the new.
+  it('persisted pin pricebook-known but UNCONFIGURED (absent from live catalog) → falls back', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      // Live catalog has ONLY mock; openai is not configured.
+      catalog: liveCatalogWith([['mock', 'mock-1']]),
+    });
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    const res = await controller.listMessages(req(userId), conversationId);
+    expect(res.pinFallback).toBe(true);
+    expect(res.previouslyPinned).toEqual({ provider: 'openai', model: 'gpt-4o-mini' });
+    // Row UNCHANGED.
+    const row = prisma.conversations.find((c) => c.id === conversationId);
+    expect(row?.pinnedProvider).toBe('openai');
+  });
+
   it('persisted pin in the live catalog → no fallback flag, no previouslyPinned', async () => {
     const prisma = createInMemoryPrisma();
     const { controller } = build(prisma, {
-      catalog: {
-        getCatalogEntry: (p, m) =>
-          p === 'openai' && m === 'gpt-4o-mini'
-            ? { promptPerMillion: 0.15, completionPerMillion: 0.6, contextWindow: 128_000 }
-            : null,
-      },
+      catalog: liveCatalogWith([['openai', 'gpt-4o-mini']]),
     });
     const { userId, conversationId } = await seedConv(prisma, {
       pinnedProvider: 'openai',
@@ -357,6 +474,9 @@ describe('ConversationsController.listMessages — pin fallback resolver (Tasks 
     const res = await controller.listMessages(req(userId), conversationId);
     expect(res.pinFallback).toBeUndefined();
     expect(res.previouslyPinned).toBeUndefined();
+    // Effective DTO keeps the live pin.
+    expect(res.conversation?.pinnedProvider).toBe('openai');
+    expect(res.conversation?.pinnedModel).toBe('gpt-4o-mini');
   });
 
   it('unpinned conversation → no fallback signals (only set when there is a persisted pin to evaluate)', async () => {
@@ -366,5 +486,61 @@ describe('ConversationsController.listMessages — pin fallback resolver (Tasks 
     const res = await controller.listMessages(req(userId), conversationId);
     expect(res.pinFallback).toBeUndefined();
     expect(res.previouslyPinned).toBeUndefined();
+    // Effective DTO carries null pins on an unpinned conversation.
+    expect(res.conversation?.pinnedProvider).toBeNull();
+    expect(res.conversation?.pinnedModel).toBeNull();
+  });
+});
+
+// chat-context-and-ux-polish (HLD §Observability / Codex review) — a structured
+// `conversation.pin.fallback` event must fire on the read-time downgrade
+// transition (and only then) so the fallback is queryable in log search.
+describe('ConversationsController.listMessages — pin-fallback observability event', () => {
+  function spyWarn(controller: ConversationsController): jest.SpyInstance {
+    const logger = (controller as unknown as { logger: { warn: (m: string) => void } }).logger;
+    return jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  }
+
+  it('emits a conversation.pin.fallback warning when a persisted pin falls back', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, { catalog: liveCatalogWith([]) });
+    const warn = spyWarn(controller);
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-unicorn-9000',
+    });
+    await controller.listMessages(req(userId), conversationId);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const msg = warn.mock.calls[0]![0] as string;
+    expect(msg).toContain('conversation.pin.fallback');
+    expect(msg).toContain(`conversationId=${conversationId}`);
+    expect(msg).toContain('previousProvider=openai');
+    expect(msg).toContain('previousModel=gpt-unicorn-9000');
+    warn.mockRestore();
+  });
+
+  it('does NOT emit the event when the persisted pin is still live', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma, {
+      catalog: liveCatalogWith([['openai', 'gpt-4o-mini']]),
+    });
+    const warn = spyWarn(controller);
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    await controller.listMessages(req(userId), conversationId);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('does NOT emit the event for an unpinned conversation', async () => {
+    const prisma = createInMemoryPrisma();
+    const { controller } = build(prisma);
+    const warn = spyWarn(controller);
+    const { userId, conversationId } = await seedConv(prisma);
+    await controller.listMessages(req(userId), conversationId);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
