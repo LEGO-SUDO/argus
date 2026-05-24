@@ -72,10 +72,16 @@ export const sanitizeSchema: SanitizeSchema = {
  */
 export function renderSanitizedMarkdown(markdown: string): string {
   return renderToStaticMarkup(
-    createElement(Markdown, {
-      remarkPlugins: [remarkGfm],
-      rehypePlugins: [[rehypeSanitize, sanitizeSchema]],
-      children: markdown,
-    }),
+    createElement(
+      Markdown,
+      {
+        remarkPlugins: [remarkGfm],
+        rehypePlugins: [[rehypeSanitize, sanitizeSchema]],
+      },
+      // Pass the Markdown source as a child (third arg) rather than a
+      // `children` prop — react-markdown reads either, and the createElement
+      // child form keeps eslint's react/no-children-prop happy.
+      markdown,
+    ),
   );
 }

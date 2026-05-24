@@ -67,6 +67,7 @@ import {
 import { ChatHero } from './ChatHero';
 import { ContextMeter } from './ContextMeter';
 import { MessageComposer } from './MessageComposer';
+import { MessageContent } from './MessageContent';
 import { MessageList, MessageMeta } from './MessageList';
 import { OmittedIndicator } from './OmittedIndicator';
 import type { WsFrameInbound } from '@argus/contracts';
@@ -427,10 +428,21 @@ export function MessageStream({
               >
                 <MessageMeta message={streaming} />
                 <div
-                  className="whitespace-pre-wrap text-[15px] leading-[1.62] text-chat-ink"
+                  className="text-[15px] leading-[1.62] text-chat-ink"
                   style={{ textWrap: 'pretty' }}
                 >
-                  {streaming.content || (
+                  {/* LLD Task 83 — render the live stream as Markdown.
+                   *  react-markdown is resilient to the partial/incomplete
+                   *  syntax that arrives mid-stream. The ellipsis placeholder
+                   *  shows before any tokens land; the blink caret is kept as
+                   *  a sibling so the streaming visual continues. */}
+                  {streaming.content ? (
+                    <MessageContent
+                      role="assistant"
+                      content={streaming.content}
+                      isStreaming
+                    />
+                  ) : (
                     <span className="text-chat-ink-3">…</span>
                   )}
                   <span className="caret" aria-hidden="true" />

@@ -22,6 +22,7 @@
 
 import { useCallback } from 'react';
 import type { Message } from '@/lib/message-stream-reducer';
+import { MessageContent } from './MessageContent';
 
 type MessageListProps = {
   messages: Message[];
@@ -122,12 +123,18 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
       <div
         data-testid={`message-bubble-${message.id}`}
         className={
-          'whitespace-pre-wrap text-[15px] leading-[1.62] ' +
+          'text-[15px] leading-[1.62] ' +
           (isFailed ? 'text-chat-ink-2' : 'text-chat-ink')
         }
         style={{ textWrap: 'pretty' }}
       >
-        {message.content}
+        {/* LLD Task 82 — assistant content renders as Markdown. The raw
+         *  source still lives in `message.content`; the copy action below
+         *  reads from there (Task 80-81), not from this rendered DOM.
+         *  `whitespace-pre-wrap` was dropped from the wrapper because
+         *  react-markdown emits real block elements (the prior plain-text
+         *  path relied on it for newline preservation). */}
+        <MessageContent role="assistant" content={message.content} />
       </div>
 
       {/* Interrupted marker — appended as a sibling, not a footer pill. */}
