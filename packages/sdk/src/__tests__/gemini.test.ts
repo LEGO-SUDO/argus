@@ -132,6 +132,24 @@ describe('GeminiAdapter (Interactions API)', () => {
     expect(body.input).toBe('hi');
   });
 
+  it('uses req.pin.model in the outbound request body, overriding env/default (Codex review #1)', async () => {
+    const fetchStub = jest.fn(async () => sseResponse(happyPathSse('hi')));
+    // No model opt and no env — would default to gemini-3-flash-preview.
+    const adapter = new GeminiAdapter({
+      apiKey: 'k',
+      fetchImpl: fetchStub as unknown as typeof fetch,
+    });
+    const chunks = await collect(
+      adapter.stream(makeReq({ pin: { provider: 'gemini', model: 'gemini-1.5-pro' } })),
+    );
+    const body = JSON.parse(fetchStub.mock.calls[0]![1]!.body as string);
+    expect(body.model).toBe('gemini-1.5-pro');
+    const done = chunks.find((c) => c.type === 'done') as
+      | { type: 'done'; providerMeta: { model: string } }
+      | undefined;
+    expect(done!.providerMeta.model).toBe('gemini-1.5-pro');
+  });
+
   it('concatenates multi-turn messages into the input string with role labels', async () => {
     const fetchStub = jest.fn(async () => sseResponse(happyPathSse('ok')));
     const adapter = new GeminiAdapter({

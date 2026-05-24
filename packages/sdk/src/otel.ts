@@ -86,6 +86,15 @@ export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
   // computation on succeed() doesn't depend on a still-mutable closure.
   const guessProvider = typeof req.guessProvider === 'string' ? req.guessProvider : null;
 
+  // chat-context-and-ux-polish LLD Task 90 (Codex review #4) — capture whether
+  // a pin override is active on this request. Used to stamp
+  // `llm.pinned_failure=false` on the SUCCESS path of a pinned turn so the
+  // pinned-non-failure case is queryable (the fail() path already stamps
+  // true/false). Without this, a successful pinned turn carried no
+  // `llm.pinned_failure` attr at all, so a Jaeger filter on
+  // `pinned_failure=false` missed every successful pinned turn.
+  const pinActive = req.pin != null;
+
   // Emit `llm.input` immediately so even a failed-before-first-token request
   // has its prompt captured in the trace.
   const inputBody = safeJsonStringify({ messages: req.messages });
@@ -124,6 +133,14 @@ export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
           OTEL_ATTRS.LLM_GUESS_COMMIT_DIVERGENT,
           guessProvider !== meta.provider,
         );
+      }
+      // LLD Task 90 (Codex review #4): a pinned turn that SUCCEEDS stamps
+      // `llm.pinned_failure=false` so the pinned-non-failure case is
+      // explicitly queryable alongside the fail() path. When no pin is active
+      // we omit the attr entirely — same policy as guess_commit_divergent
+      // (a blanket `false` on every unpinned span would muddy the metric).
+      if (pinActive) {
+        span.setAttribute(OTEL_ATTRS.LLM_PINNED_FAILURE, false);
       }
       addBodyEvent(span, SPAN_EVENT_NAMES.LLM_OUTPUT, outputContent);
       span.setStatus({ code: SpanStatusCode.OK });

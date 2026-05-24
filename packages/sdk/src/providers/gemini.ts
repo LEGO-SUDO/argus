@@ -77,7 +77,9 @@ export class GeminiAdapter implements ProviderAdapter {
     if (!apiKey) {
       throw new ProviderError('provider_not_configured', 'GOOGLE_API_KEY not set');
     }
-    const model = this.opts.model ?? process.env.GOOGLE_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
+    // opts/env/default. See the matching comment in providers/openai.ts.
+    const model = req.pin?.model ?? this.opts.model ?? process.env.GOOGLE_MODEL ?? DEFAULT_MODEL;
     const endpoint = this.opts.endpoint ?? ENDPOINT;
     const fetchImpl = this.opts.fetchImpl ?? fetch;
 

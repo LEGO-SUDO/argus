@@ -219,8 +219,16 @@ async function* wrapCommitted(
  * a defensive guard ensures duplicate calls inside this wrapper never
  * produce a second commit chunk (LLD Task 30, Preamble §2).
  *
- * If the buffered chunk is a zero-length token, we drain forward one chunk
- * at a time until a non-empty token (or a `done`) lands.
+ * chat-context-and-ux-polish (Codex review wire-protocol fix):
+ *   - Leading zero-length token chunks are SUPPRESSED entirely until the
+ *     commit fires. Forwarding them would ship as WS `token@1` and then
+ *     metadata wants seq=1 — duplicate seq + metadata-after-token both
+ *     violate the per-message frame ordering (LLD Preamble §2). Once the
+ *     commit fires, subsequent zero-length tokens are coalesced (dropped)
+ *     defensively too — adapters don't normally yield empty tokens mid-
+ *     stream and a leaked one only inflates the seq counter.
+ *   - If the buffered chunk is a zero-length token, we drain forward one
+ *     chunk at a time until a non-empty token (or a `done`) lands.
  */
 async function* wrapCommittedFromBuffered(
   adapter: ProviderAdapter,
@@ -239,8 +247,8 @@ async function* wrapCommittedFromBuffered(
 
   // Drain the buffered chunk first, then continue with the iterator. We
   // gate commit emission on the first NON-EMPTY token; zero-length tokens
-  // and the `done`-after-empty case both pass through without a commit
-  // until a real token arrives.
+  // before commit are dropped, and zero-length tokens after commit are
+  // also coalesced defensively.
   let current: ChatStreamChunk | null = buffered;
   let done = false;
   while (!done) {
@@ -250,8 +258,10 @@ async function* wrapCommittedFromBuffered(
         if (commit) yield commit;
         yield current;
       } else if (current.type === 'token') {
-        // Zero-length token — forward but don't trigger commit yet.
-        yield current;
+        // Zero-length token — DROP entirely. Pre-commit forwarding would
+        // collide with metadata's seq=1; post-commit forwarding would just
+        // inflate the seq counter for no UI value. Either way: nothing to
+        // emit.
       } else if (current.type === 'done') {
         // Stream ending without any non-empty token; emit commit if we
         // haven't (defensive — the orchestrator can render an immediate

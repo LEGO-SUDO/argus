@@ -57,7 +57,14 @@ export class OpenAIProvider implements ProviderAdapter {
   }
 
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
-    const model = this.opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins. The
+    // router routes us via the override branch (pin.provider === 'openai'),
+    // so a pinned model here is the operator's explicit choice and MUST
+    // override the env / DEFAULT fallback. Without this, every pinned turn
+    // silently runs against OPENAI_MODEL (or gpt-4o-mini) regardless of what
+    // the picker said.
+    const model =
+      req.pin?.model ?? this.opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
     const client = this.opts.client ?? this.buildClient();
 
     let response;

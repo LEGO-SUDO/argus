@@ -66,7 +66,10 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
-    const model = this.opts.model ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
+    // opts/env/default. See the matching comment in providers/openai.ts.
+    const model =
+      req.pin?.model ?? this.opts.model ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
     const maxTokens = this.opts.maxTokens ?? DEFAULT_MAX_TOKENS;
     const client = this.opts.client ?? this.buildClient();
 

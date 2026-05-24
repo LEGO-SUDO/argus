@@ -425,6 +425,145 @@ describe('ProviderRouter', () => {
     });
   });
 
+  // chat-context-and-ux-polish (Codex review #1) — the router's override
+  // branch must thread the pin's model into the adapter's stream() call. An
+  // adapter that reports `req.pin.model` (rather than its own default) is the
+  // observable proof the pin reached the adapter.
+  describe('pinned model propagation to the adapter (Codex review #1)', () => {
+    it('routes the pinned request into the adapter with req.pin set, and the adapter resolves the pinned model', async () => {
+      let capturedModel: string | null = null;
+      // Adapter that resolves its model the same way the real adapters do
+      // (req.pin?.model wins) and reports it on the commit/done meta.
+      const modelReportingAdapter: ProviderAdapter = {
+        name: 'anthropic',
+        isConfigured: () => true,
+        listModels: () => ['claude-haiku-4-5'],
+        async *stream(req) {
+          const model = req.pin?.model ?? 'claude-haiku-4-5';
+          capturedModel = model;
+          yield { type: 'token', content: 'hi' };
+          yield { type: 'done', providerMeta: { provider: 'anthropic', model } };
+        },
+      };
+      const router = new ProviderRouter({
+        mockOnly: false,
+        order: ['openai', 'anthropic', 'gemini'],
+        adapters: {
+          mock: stubHappy('mock'),
+          openai: stubHappy('openai'),
+          anthropic: modelReportingAdapter,
+          gemini: stubHappy('gemini'),
+        },
+      });
+      await collect(
+        router.stream(makeReq({ pin: { provider: 'anthropic', model: 'claude-opus-4-7' } })),
+      );
+      // The adapter saw the pinned model, NOT its default.
+      expect(capturedModel).toBe('claude-opus-4-7');
+    });
+
+    it('the synthetic commit chunk carries the pinned model the adapter resolved', async () => {
+      const adapter: ProviderAdapter = {
+        name: 'anthropic',
+        isConfigured: () => true,
+        listModels: () => ['claude-haiku-4-5'],
+        async *stream(req) {
+          const model = req.pin?.model ?? 'claude-haiku-4-5';
+          yield { type: 'token', content: 'hi' };
+          yield { type: 'done', providerMeta: { provider: 'anthropic', model } };
+        },
+      };
+      const router = new ProviderRouter({
+        mockOnly: false,
+        order: ['anthropic'],
+        adapters: {
+          mock: stubHappy('mock'),
+          openai: stubHappy('openai'),
+          anthropic: adapter,
+          gemini: stubHappy('gemini'),
+        },
+      });
+      const chunks = await collect(
+        router.stream(makeReq({ pin: { provider: 'anthropic', model: 'claude-opus-4-7' } })),
+      );
+      const commit = chunks.find((c) => c.type === 'commit');
+      expect(commit && commit.type === 'commit' && commit.providerMeta.model).toBe(
+        'claude-opus-4-7',
+      );
+    });
+  });
+
+  // chat-context-and-ux-polish (Codex review — wire-protocol violation). A
+  // leading empty token must NOT be forwarded before the commit signal: doing
+  // so ships a WS token@1 and then metadata also wants seq=1 (duplicate seq +
+  // metadata-after-token). The router must suppress the leading empty token
+  // and emit commit immediately before the first NON-empty token.
+  describe('leading empty token suppression (Codex review)', () => {
+    it('emits commit → token(hello) with the leading empty token suppressed', async () => {
+      const emptyThenHello: ProviderAdapter = {
+        name: 'openai',
+        isConfigured: () => true,
+        listModels: () => ['gpt-4o-mini'],
+        async *stream() {
+          yield { type: 'token', content: '' };
+          yield { type: 'token', content: 'hello' };
+          yield { type: 'done', providerMeta: { provider: 'openai', model: 'gpt-4o-mini' } };
+        },
+      };
+      const router = new ProviderRouter({
+        mockOnly: false,
+        order: ['openai'],
+        adapters: {
+          mock: stubHappy('mock'),
+          openai: emptyThenHello,
+          anthropic: stubHappy('anthropic'),
+          gemini: stubHappy('gemini'),
+        },
+      });
+      const chunks = await collect(router.stream(makeReq()));
+      // Drop the trailing `done` for the ordering assertion.
+      const nonDone = chunks.filter((c) => c.type !== 'done');
+      // EXACTLY: commit then the hello token. No leading empty token.
+      expect(nonDone).toHaveLength(2);
+      expect(nonDone[0]!.type).toBe('commit');
+      expect(nonDone[1]).toEqual({ type: 'token', content: 'hello' });
+      // No empty-content token frame anywhere in the stream.
+      expect(
+        chunks.some((c) => c.type === 'token' && c.content === ''),
+      ).toBe(false);
+    });
+
+    it('coalesces a mid-stream zero-length token after commit (defensive)', async () => {
+      const emptyMidStream: ProviderAdapter = {
+        name: 'openai',
+        isConfigured: () => true,
+        listModels: () => ['gpt-4o-mini'],
+        async *stream() {
+          yield { type: 'token', content: 'a' };
+          yield { type: 'token', content: '' };
+          yield { type: 'token', content: 'b' };
+          yield { type: 'done', providerMeta: { provider: 'openai', model: 'gpt-4o-mini' } };
+        },
+      };
+      const router = new ProviderRouter({
+        mockOnly: false,
+        order: ['openai'],
+        adapters: {
+          mock: stubHappy('mock'),
+          openai: emptyMidStream,
+          anthropic: stubHappy('anthropic'),
+          gemini: stubHappy('gemini'),
+        },
+      });
+      const chunks = await collect(router.stream(makeReq()));
+      const tokenContents = chunks
+        .filter((c) => c.type === 'token')
+        .map((c) => (c.type === 'token' ? c.content : ''));
+      // The empty mid-stream token is dropped; only 'a' and 'b' survive.
+      expect(tokenContents).toEqual(['a', 'b']);
+    });
+  });
+
   it('treats an empty stream as a pre-token failure and fails over', async () => {
     const emptyAdapter: ProviderAdapter = {
       name: 'openai',

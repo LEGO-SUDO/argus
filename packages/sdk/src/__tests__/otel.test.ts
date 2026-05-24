@@ -188,4 +188,22 @@ describe('startLlmSpan — new context + pin attrs (Tasks 33/34)', () => {
     const s = getSpan();
     expect(s.attributes['llm.guess_commit_divergent']).toBe(false);
   });
+
+  // chat-context-and-ux-polish LLD Task 90 (Codex review #4) — pinned-non-
+  // failure case. A pinned turn that SUCCEEDS stamps llm.pinned_failure=false.
+  it('on a pinned turn that succeeds, sets llm.pinned_failure=false', () => {
+    const span = startLlmSpan(
+      makeReqWithHints({ pin: { provider: 'anthropic', model: 'claude-opus-4-7' } }),
+    );
+    span.succeed({ provider: 'anthropic', model: 'claude-opus-4-7' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBe(false);
+  });
+
+  it('on an UNPINNED turn that succeeds, omits llm.pinned_failure entirely', () => {
+    const span = startLlmSpan(makeReq());
+    span.succeed({ provider: 'openai', model: 'gpt-4o-mini' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBeUndefined();
+  });
 });

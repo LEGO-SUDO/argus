@@ -41,6 +41,12 @@ export class MockProvider implements ProviderAdapter {
       : generateResponse(req.conversationId, req.turnIndex);
     const tokens = tokenize(text);
 
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
+    // MOCK_MODEL env and the 'mock-1' default. The router only routes a
+    // pinned request to the mock adapter when pin.provider === 'mock', so a
+    // pin here is the operator's explicit choice.
+    const model = req.pin?.model ?? process.env.MOCK_MODEL ?? 'mock-1';
+
     for (const tok of tokens) {
       if (req.signal?.aborted) return;
       // Microtask hop lets the caller interleave abort/cancel between yields.
@@ -54,7 +60,7 @@ export class MockProvider implements ProviderAdapter {
       type: 'done',
       providerMeta: {
         provider: 'mock',
-        model: process.env.MOCK_MODEL ?? 'mock-1',
+        model,
         promptTokens,
         completionTokens,
       },
