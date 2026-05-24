@@ -11,9 +11,16 @@
 // in `server-only` via `serverApiFetch`, which Next.js rejects when the
 // import graph reaches a client component. The test therefore mocks
 // authFetch and shapes returns to match the MessageListResponse contract.
+//
+// LLD Tasks 21-32 (this LLD): tokensUsed/tokensBudget hydration on the
+// mapped Message; pinFallbackNotice round-trip (fetch → cache → hook →
+// clearPinFallbackNotice helper). Both fields are part of the
+// MessageListResponse shape the backend ships in the backbone PR; this
+// file's tests pin the wire shape via stub payloads.
 
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import {
+  clearPinFallbackNotice,
   primeConversationHistoryCache,
   useConversationHistory,
   _resetConversationHistoryCacheForTests,
@@ -156,5 +163,202 @@ describe('primeConversationHistoryCache', () => {
     const { result } = renderHook(() => useConversationHistory(CONV_ID));
     expect(result.current.status).toBe('ready');
     expect(authFetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLD Tasks 21-22: tokensUsed / tokensBudget hydration from REST DTO
+// ---------------------------------------------------------------------------
+describe('useConversationHistory — tokens hydration', () => {
+  it('copies tokensUsed and tokensBudget from the messages-list response onto mapped Message', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: 'hi',
+          status: 'complete',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          tokensUsed: 4321,
+          tokensBudget: 8192,
+        },
+      ],
+      omittedCount: 0,
+    });
+    const { result } = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+    if (result.current.status !== 'ready') throw new Error('unreachable');
+    const mapped = result.current.messages[0];
+    expect(mapped?.tokensUsed).toBe(4321);
+    expect(mapped?.tokensBudget).toBe(8192);
+  });
+
+  it('leaves token fields undefined when DTO does not carry them', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: 'hi',
+          status: 'complete',
+        },
+      ],
+      omittedCount: 0,
+    });
+    const { result } = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+    if (result.current.status !== 'ready') throw new Error('unreachable');
+    const mapped = result.current.messages[0];
+    expect(mapped?.tokensUsed).toBeUndefined();
+    expect(mapped?.tokensBudget).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLD Tasks 23-32: pinFallbackNotice surface + cache helper.
+//
+// Wire shape (Locked Contracts mirror): the messages-list response carries
+// an OPTIONAL top-level `pinFallbackNotice` object naming the
+// previously-pinned provider+model. The hook surfaces it on its `ready`
+// snapshot for the MessageComposer to render an inline notice on first
+// paint. `clearPinFallbackNotice(conversationId)` is the public helper for
+// dismissal; it preserves messages and omittedCount.
+// ---------------------------------------------------------------------------
+describe('useConversationHistory — pinFallbackNotice surface', () => {
+  // Task 23-24
+  it('surfaces pinFallbackNotice from the response on the ready snapshot', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      pinFallbackNotice: {
+        previousProvider: 'openai',
+        previousModel: 'gpt-4o-mini',
+      },
+    });
+    const { result } = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+    if (result.current.status !== 'ready') throw new Error('unreachable');
+    expect(result.current.pinFallbackNotice).toEqual({
+      previousProvider: 'openai',
+      previousModel: 'gpt-4o-mini',
+    });
+  });
+
+  // Task 25-26
+  it('preserves the notice across hook unmount → remount via the module cache', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      pinFallbackNotice: {
+        previousProvider: 'anthropic',
+        previousModel: 'claude-3-sonnet',
+      },
+    });
+    const first = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(first.result.current.status).toBe('ready');
+    });
+    first.unmount();
+
+    // Remount — should rehydrate from cache without re-fetching.
+    const second = renderHook(() => useConversationHistory(CONV_ID));
+    expect(second.result.current.status).toBe('ready');
+    if (second.result.current.status !== 'ready') throw new Error('unreachable');
+    expect(second.result.current.pinFallbackNotice).toEqual({
+      previousProvider: 'anthropic',
+      previousModel: 'claude-3-sonnet',
+    });
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Task 27-28
+  it('clearPinFallbackNotice removes the notice for the targeted conversation only', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      pinFallbackNotice: { previousProvider: 'p1', previousModel: 'm1' },
+    });
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      pinFallbackNotice: { previousProvider: 'p2', previousModel: 'm2' },
+    });
+    // Prime both conversations.
+    const h1 = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(h1.result.current.status).toBe('ready');
+    });
+    const h2 = renderHook(() => useConversationHistory(OTHER_CONV_ID));
+    await waitFor(() => {
+      expect(h2.result.current.status).toBe('ready');
+    });
+    h1.unmount();
+    h2.unmount();
+
+    // Clear only CONV_ID.
+    act(() => {
+      clearPinFallbackNotice(CONV_ID);
+    });
+
+    // Remount both; the cleared conversation has no notice; the other still does.
+    const after1 = renderHook(() => useConversationHistory(CONV_ID));
+    if (after1.result.current.status !== 'ready') throw new Error('unreachable');
+    expect(after1.result.current.pinFallbackNotice).toBeUndefined();
+
+    const after2 = renderHook(() => useConversationHistory(OTHER_CONV_ID));
+    if (after2.result.current.status !== 'ready') throw new Error('unreachable');
+    expect(after2.result.current.pinFallbackNotice).toEqual({
+      previousProvider: 'p2',
+      previousModel: 'm2',
+    });
+  });
+
+  // Task 29-30
+  it('clearPinFallbackNotice preserves messages and omittedCount', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [
+        { id: 'm1', role: 'user', content: 'hi', status: 'complete' },
+      ],
+      omittedCount: 7,
+      pinFallbackNotice: { previousProvider: 'p1', previousModel: 'm1' },
+    });
+    const h1 = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(h1.result.current.status).toBe('ready');
+    });
+    h1.unmount();
+
+    act(() => {
+      clearPinFallbackNotice(CONV_ID);
+    });
+
+    const after = renderHook(() => useConversationHistory(CONV_ID));
+    if (after.result.current.status !== 'ready') throw new Error('unreachable');
+    expect(after.result.current.messages).toHaveLength(1);
+    expect(after.result.current.messages[0]?.id).toBe('m1');
+    expect(after.result.current.omittedCount).toBe(7);
+    expect(after.result.current.pinFallbackNotice).toBeUndefined();
+  });
+
+  // Task 31-32
+  it('absence of pinFallbackNotice in response leaves ready.pinFallbackNotice undefined', async () => {
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      // no pinFallbackNotice
+    });
+    const { result } = renderHook(() => useConversationHistory(CONV_ID));
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+    if (result.current.status !== 'ready') throw new Error('unreachable');
+    expect(result.current.pinFallbackNotice).toBeUndefined();
   });
 });

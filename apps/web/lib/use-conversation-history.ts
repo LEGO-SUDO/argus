@@ -29,6 +29,33 @@ import { ApiError, authFetch } from './auth-fetch';
 import type { Message } from './message-stream-reducer';
 import type { MessageDto, MessageListResponse } from '@argus/contracts';
 
+// ---------------------------------------------------------------------------
+// PinFallbackNotice — surfaced when the server falls back from a stale pin.
+//
+// The notice payload carries the previously-pinned provider/model strings so
+// the MessageComposer can render an inline notice on first paint. Shape is
+// pinned by the LLD "Locked Contracts" section; the canonical zod schema is
+// owned by the backend worker and merges in the backbone PR.
+// ---------------------------------------------------------------------------
+export type PinFallbackNotice = {
+  previousProvider: string;
+  previousModel: string;
+};
+
+// Extended response shape — same as MessageListResponse plus the optional
+// notice. Once the contracts side adds it we can drop this local widening.
+type MessageListResponseExt = MessageListResponse & {
+  pinFallbackNotice?: PinFallbackNotice;
+};
+
+// MessageDto-side extension for tokensUsed/tokensBudget that the backend
+// will add in the same PR. We read them defensively so a build whose
+// contracts haven't shipped yet still compiles.
+type MessageDtoExt = MessageDto & {
+  tokensUsed?: number;
+  tokensBudget?: number;
+};
+
 // Browser-only fetch for message history. We call `authFetch` directly
 // (rather than the shared `getMessages` in `conversations-api.ts`) so this
 // module stays free of the `server-only` import that `conversations-api`
@@ -39,20 +66,33 @@ import type { MessageDto, MessageListResponse } from '@argus/contracts';
 // Webpack tracks the static import graph, not the runtime branch.
 async function fetchMessagesFromBrowser(
   conversationId: string,
-): Promise<{ messages: MessageDto[]; omittedCount: number }> {
-  const res = await authFetch<MessageListResponse>(
+): Promise<{
+  messages: MessageDtoExt[];
+  omittedCount: number;
+  pinFallbackNotice?: PinFallbackNotice;
+}> {
+  const res = await authFetch<MessageListResponseExt>(
     `/api/conversations/${conversationId}/messages`,
     { method: 'GET' },
   );
-  return {
-    messages: res.messages,
+  const out: {
+    messages: MessageDtoExt[];
+    omittedCount: number;
+    pinFallbackNotice?: PinFallbackNotice;
+  } = {
+    messages: res.messages as MessageDtoExt[],
     omittedCount: res.omittedCount ?? 0,
   };
+  if (res.pinFallbackNotice) {
+    out.pinFallbackNotice = res.pinFallbackNotice;
+  }
+  return out;
 }
 
 type HistorySnapshot = {
   messages: Message[];
   omittedCount: number;
+  pinFallbackNotice?: PinFallbackNotice;
 };
 
 // Module-level cache. Lives for the lifetime of the SPA session.
@@ -66,6 +106,12 @@ export type ConversationHistoryState =
       conversationId: string;
       messages: Message[];
       omittedCount: number;
+      /**
+       * Set when the server fell back from the stale pin on first hydration
+       * — drives the inline "previously pinned X / Y is unavailable" notice
+       * in MessageComposer. Cleared via `clearPinFallbackNotice`.
+       */
+      pinFallbackNotice?: PinFallbackNotice;
     }
   | { status: 'error'; conversationId: string; error: Error };
 
@@ -101,12 +147,7 @@ export function useConversationHistory(
     if (!conversationId) return { status: 'idle' };
     const hit = cache.get(conversationId);
     if (hit) {
-      return {
-        status: 'ready',
-        conversationId,
-        messages: hit.messages,
-        omittedCount: hit.omittedCount,
-      };
+      return readySnapshotFrom(conversationId, hit);
     }
     if (skipForRef.current?.has(conversationId)) {
       return {
@@ -139,12 +180,7 @@ export function useConversationHistory(
     // Cache hit — synchronously return.
     const hit = cache.get(conversationId);
     if (hit) {
-      setState({
-        status: 'ready',
-        conversationId,
-        messages: hit.messages,
-        omittedCount: hit.omittedCount,
-      });
+      setState(readySnapshotFrom(conversationId, hit));
       return;
     }
 
@@ -158,14 +194,14 @@ export function useConversationHistory(
         const snapshot: HistorySnapshot = {
           messages: result.messages.map(toReducerMessage),
           omittedCount: result.omittedCount,
+          // Only set the notice when the response actually carried one — do
+          // not invent a stale value (Task 31-32).
+          ...(result.pinFallbackNotice
+            ? { pinFallbackNotice: result.pinFallbackNotice }
+            : {}),
         };
         cache.set(conversationId, snapshot);
-        setState({
-          status: 'ready',
-          conversationId,
-          messages: snapshot.messages,
-          omittedCount: snapshot.omittedCount,
-        });
+        setState(readySnapshotFrom(conversationId, snapshot));
       } catch (err) {
         if (cancelled) return;
         // ApiError 404 means the user doesn't own this conversation (or it
@@ -207,12 +243,55 @@ export function primeConversationHistoryCache(
   });
 }
 
+/**
+ * Removes the `pinFallbackNotice` from the cache entry for the given
+ * conversation, leaving `messages` and `omittedCount` intact. Used by
+ * MessageComposer's dismiss control; the cache mutation persists across
+ * hook re-renders so the notice does NOT re-show on subsequent mounts.
+ *
+ * No-op if the conversation has no cache entry yet.
+ */
+export function clearPinFallbackNotice(conversationId: string): void {
+  const entry = cache.get(conversationId);
+  if (!entry) return;
+  if (entry.pinFallbackNotice === undefined) return;
+  // Mutate-in-place by writing a fresh entry that preserves every other
+  // field — keeps the API surface "delete just the notice".
+  const next: HistorySnapshot = {
+    messages: entry.messages,
+    omittedCount: entry.omittedCount,
+  };
+  cache.set(conversationId, next);
+}
+
 /** Test-only — reset the module cache between tests. */
 export function _resetConversationHistoryCacheForTests(): void {
   cache.clear();
 }
 
-function toReducerMessage(dto: MessageDto): Message {
+/**
+ * Build a `ready` snapshot from a cache/fetch HistorySnapshot. Centralised
+ * because both the lazy-init path and the post-fetch path need the same
+ * shape (and need to omit `pinFallbackNotice` when unset rather than write
+ * `undefined`, so the consumer's truthy check stays simple).
+ */
+function readySnapshotFrom(
+  conversationId: string,
+  snapshot: HistorySnapshot,
+): ConversationHistoryState {
+  const base = {
+    status: 'ready' as const,
+    conversationId,
+    messages: snapshot.messages,
+    omittedCount: snapshot.omittedCount,
+  };
+  if (snapshot.pinFallbackNotice) {
+    return { ...base, pinFallbackNotice: snapshot.pinFallbackNotice };
+  }
+  return base;
+}
+
+function toReducerMessage(dto: MessageDtoExt): Message {
   // Mirror of the mapper that previously lived in
   // `app/chat/[conversationId]/page.tsx`. Kept here so the client-side
   // hydration path stays self-contained.
@@ -227,6 +306,15 @@ function toReducerMessage(dto: MessageDto): Message {
   if (dto.errorCode) m.errorCode = dto.errorCode;
   if (dto.status === 'failed') {
     m.canRetry = true;
+  }
+  // LLD Tasks 21-22: hydrate token-usage fields verbatim from the DTO.
+  // Defensive `typeof` check — the contracts module on this branch does
+  // not yet declare these fields, so older payloads omit them entirely.
+  if (typeof dto.tokensUsed === 'number') {
+    m.tokensUsed = dto.tokensUsed;
+  }
+  if (typeof dto.tokensBudget === 'number') {
+    m.tokensBudget = dto.tokensBudget;
   }
   return m;
 }
