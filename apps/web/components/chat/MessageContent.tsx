@@ -28,7 +28,7 @@ import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
 
-import { sanitizeSchema } from '@/lib/sanitize-markdown';
+import { rehypeUrlSchemeGuard, sanitizeSchema } from '@/lib/sanitize-markdown';
 
 type MessageContentProps = {
   role: 'user' | 'assistant' | 'system';
@@ -74,7 +74,11 @@ export function MessageContent({ role, content, isStreaming }: MessageContentPro
     <div data-testid="message-content-markdown" className="markdown-body">
       <Markdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+        // rehypeUrlSchemeGuard runs FIRST — it strips obfuscated/encoded
+        // dangerous schemes (jav&#x61;script:, JaVaScRiPt:, %6a-encoded, tab/
+        // newline/NUL mangled) before the sanitizer's scheme matcher sees the
+        // value. rehype-sanitize is the final allow-list pass.
+        rehypePlugins={[rehypeUrlSchemeGuard, [rehypeSanitize, sanitizeSchema]]}
         components={components}
       >
         {content}

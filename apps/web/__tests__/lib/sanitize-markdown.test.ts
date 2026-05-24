@@ -11,7 +11,11 @@
 //             obfuscation), applied identically to anchor href and image src.
 // Raw HTML tags not produced by react-markdown's own renderers are stripped.
 
-import { renderSanitizedMarkdown, sanitizeSchema } from '@/lib/sanitize-markdown';
+import {
+  extractScheme,
+  renderSanitizedMarkdown,
+  sanitizeSchema,
+} from '@/lib/sanitize-markdown';
 
 describe('sanitize-markdown — dangerous URL schemes in href', () => {
   // Task 33-34
@@ -65,6 +69,68 @@ describe('sanitize-markdown — image src follows the same rules', () => {
     const dangerous = renderSanitizedMarkdown('![bad](javascript:alert(1))');
     expect(dangerous).not.toMatch(/src="javascript:/i);
   });
+
+  // image src must NOT allow mailto: (href may, src may not).
+  it('strips a mailto: image src (src allow-list is http/https only)', () => {
+    const html = renderSanitizedMarkdown('![x](mailto:a@b.com)');
+    expect(html).not.toMatch(/src="mailto:/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex finding #2: the case-sensitive scheme matcher could be bypassed by
+// HTML-entity / percent / control-char obfuscation. `rehypeUrlSchemeGuard`
+// normalizes (decode → strip control chars → lowercase) before the allow/deny
+// decision. These tests pin that the obfuscated forms are all dropped.
+// ---------------------------------------------------------------------------
+describe('sanitize-markdown — obfuscated dangerous schemes (encoded/control)', () => {
+  const obfuscated = [
+    ['mixed-case javascript', '[x](JaVaScRiPt:alert(1))'],
+    ['decimal-entity j (&#106;)', '[x](&#106;avascript:alert(1))'],
+    ['hex-entity a (jav&#x61;script:)', '[x](jav&#x61;script:alert(1))'],
+    ['hex-entity j (&#x6a;)', '[x](&#x6a;avascript:alert(1))'],
+    ['entity-with-no-semicolon', '[x](&#x6aavascript:alert(1))'],
+    ['percent-encoded j (%6a)', '[x](%6aavascript:alert(1))'],
+    ['tab inside scheme', '[x](java\tscript:alert(1))'],
+    ['newline inside scheme', '[x](java\nscript:alert(1))'],
+    ['leading whitespace', '[x]( javascript:alert(1))'],
+    ['null byte inside scheme', '[x](java\x00script:alert(1))'],
+    ['mixed-case data', '[x](DaTa:text/html,x)'],
+    ['mixed-case vbscript', '[x](VbScRiPt:msgbox(1))'],
+    ['entity colon (java&#x3a;script)', '[x](javascript&#x3a;alert(1))'],
+  ] as const;
+
+  it.each(obfuscated)('drops href for %s', (_label, md) => {
+    const html = renderSanitizedMarkdown(md);
+    // No anchor in the output may carry a dangerous scheme in its href.
+    expect(html).not.toMatch(/href="[^"]*(javascript|data|vbscript)/i);
+  });
+});
+
+describe('sanitize-markdown — extractScheme normalization unit', () => {
+  it.each([
+    ['javascript:x', 'javascript'],
+    ['JaVaScRiPt:x', 'javascript'],
+    [' \t\njavascript:x', 'javascript'],
+    ['jav\tascript:x', 'javascript'],
+    ['jav&#x61;script:x', 'javascript'],
+    ['&#106;avascript:x', 'javascript'],
+    ['%6aavascript:x', 'javascript'],
+    ['http://example.com', 'http'],
+    ['mailto:a@b.com', 'mailto'],
+  ])('normalizes %s → %s', (input, expected) => {
+    expect(extractScheme(input)).toBe(expected);
+  });
+
+  it.each([
+    ['//host/path'],
+    ['/relative/path'],
+    ['#fragment'],
+    ['relative.html'],
+    ['/a:b'], // colon after slash is not a scheme delimiter
+  ])('treats %s as scheme-less (relative/safe)', (input) => {
+    expect(extractScheme(input)).toBeNull();
+  });
 });
 
 describe('sanitize-markdown — allowed schemes survive', () => {
@@ -109,5 +175,8 @@ describe('sanitize-markdown — schema export', () => {
       expect.arrayContaining(['http', 'https']),
     );
     expect(sanitizeSchema.protocols?.src).not.toContain('javascript');
+    // src is http/https only — mailto/data are not valid image sources.
+    expect(sanitizeSchema.protocols?.src).not.toContain('mailto');
+    expect(sanitizeSchema.protocols?.src).not.toContain('data');
   });
 });
