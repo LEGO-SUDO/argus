@@ -221,7 +221,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   private async handleSend(
     client: ChatClient,
     data: ChatClientData,
-    frame: { type: 'send'; conversationId: string | null; content: string },
+    frame: {
+      type: 'send';
+      conversationId: string | null;
+      content: string;
+      // chat-context-and-ux-polish (integration review — first-turn pin race).
+      // Optional pin carried on the send frame so the FIRST turn of a brand-new
+      // conversation honors the picker selection. Coupled at the contract
+      // boundary (WsSendFrameSchema): both present or both omitted.
+      pinnedProvider?: string;
+      pinnedModel?: string;
+    },
   ): Promise<void> {
     // Mint the assistant messageId BEFORE any work that can fail — the
     // frontend correlates `error` / `end` frames to its `send` frame by
@@ -230,6 +240,42 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     // here is the same one we'll later pass into startTurn so the happy path
     // is end-to-end consistent.
     const assistantMessageId = this.chatService.mintMessageId();
+
+    // chat-context-and-ux-polish (integration review — first-turn pin race).
+    // A send-frame pin is validated against the LIVE catalog BEFORE any write
+    // (no conversation/message rows on a rejection) — the SAME validation the
+    // PATCH handler uses (listConfiguredProviders). An invalid pin emits the
+    // error+end terminal with `invalid_pin` and never starts the turn. The
+    // contract already guarantees both fields move together, so a present
+    // provider implies a present model.
+    let sendPin: { provider: string; model: string } | undefined;
+    if (frame.pinnedProvider && frame.pinnedModel) {
+      const live = this.catalog.listConfiguredProviders();
+      const ok = live.some(
+        (e) => e.provider === frame.pinnedProvider && e.model === frame.pinnedModel,
+      );
+      if (!ok) {
+        captureApiError({
+          err: new Error('invalid_pin'),
+          feature: 'chat',
+          layer: 'gateway',
+          statusClass: '4xx',
+          extra: {
+            stage: 'send-pin-validate',
+            pinnedProvider: frame.pinnedProvider,
+            pinnedModel: frame.pinnedModel,
+          },
+        });
+        this.emitFailureTerminal(
+          client,
+          assistantMessageId,
+          'invalid_pin',
+          `pin (${frame.pinnedProvider}, ${frame.pinnedModel}) is not in the live catalog`,
+        );
+        return;
+      }
+      sendPin = { provider: frame.pinnedProvider, model: frame.pinnedModel };
+    }
 
     // If conversationId is null this is the FIRST turn of a brand-new
     // conversation — mint a conversation row right here so subsequent frames
@@ -273,6 +319,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         // emitted here correlate to the message row that startTurn would have
         // written on success.
         assistantMessageId,
+        // chat-context-and-ux-polish (integration review — first-turn pin
+        // race). When the send frame carried a (validated) pin, persist it
+        // onto the conversation row INSIDE the startTurn transaction so it's
+        // atomic with the message inserts and respects the same userId
+        // ownership scoping. Turn 2+ then read it via the persisted-pin path.
+        ...(sendPin ? { pin: sendPin } : {}),
       });
     } catch (err) {
       captureApiError({
@@ -290,10 +342,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     // chat-context-and-ux-polish LLD Tasks 61/63/65 — build the SDK
     // request with pin (when both columns set), effective budget +
     // context window cap (catalog-derived), and the cached guess.
+    //
+    // Precedence (integration review — first-turn pin race): an explicit pin
+    // on the send frame wins over the conversation's persisted pin for THIS
+    // turn. `sendPin` was already validated against the live catalog and
+    // persisted inside the startTurn transaction above, so the persisted-pin
+    // read would already reflect it — but we resolve `sendPin` first
+    // explicitly so the precedence is obvious and independent of read timing.
     const pin =
-      startResult.pinnedProvider && startResult.pinnedModel
+      sendPin ??
+      (startResult.pinnedProvider && startResult.pinnedModel
         ? { provider: startResult.pinnedProvider, model: startResult.pinnedModel }
-        : undefined;
+        : undefined);
     const configuredDefault = defaultContextBudget();
     const effectiveBudget = this.catalog.getEffectiveBudget(configuredDefault, pin);
     // Window cap is the pinned model's contextWindow (or absent when no pin

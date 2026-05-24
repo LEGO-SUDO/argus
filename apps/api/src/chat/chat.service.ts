@@ -39,6 +39,17 @@ export interface StartTurnInput {
    * single-call API for non-gateway callers).
    */
   assistantMessageId?: string;
+  /**
+   * chat-context-and-ux-polish (integration review — first-turn pin race).
+   * Optional pin carried on the WS `send` frame. When present, it is persisted
+   * onto the conversation row INSIDE the startTurn transaction (atomic with the
+   * message inserts, scoped by userId like every other conversations write) so
+   * turn 2+ flow through the existing persisted-pin path. The gateway validates
+   * the pin against the live catalog BEFORE calling startTurn, so this is
+   * trusted by the time it reaches here. The returned pin pair reflects the
+   * just-persisted value.
+   */
+  pin?: { provider: string; model: string };
 }
 
 export interface ChatHistoryMessage {
@@ -155,6 +166,24 @@ export class ChatService {
           startedAt: now,
         },
       });
+
+      // 4b. chat-context-and-ux-polish (integration review — first-turn pin
+      //     race). Persist the send-frame pin onto the conversation row INSIDE
+      //     the transaction so it's atomic with the message inserts. updateMany
+      //     scoped by (id, userId) so the write respects the same ownership
+      //     guard as every other conversations write (and is a no-op for a
+      //     foreign conversation — though startTurn already authz-checked
+      //     above). Persisting here means the re-read in step 6 returns the
+      //     fresh pin, and turn 2+ pick it up via the persisted-pin path.
+      if (input.pin) {
+        await tx.conversation.updateMany({
+          where: { id: input.conversationId, userId: input.userId },
+          data: {
+            pinnedProvider: input.pin.provider,
+            pinnedModel: input.pin.model,
+          },
+        });
+      }
 
       // 5. LLD Task 53 — load the multi-turn history INSIDE the transaction,
       //    after the user-message insert, so the new user message is included

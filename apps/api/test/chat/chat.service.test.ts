@@ -289,6 +289,88 @@ describe('ChatService', () => {
     });
   });
 
+  // chat-context-and-ux-polish (integration review — first-turn pin race).
+  // When the WS `send` frame carries a (catalog-validated) pin, startTurn
+  // persists it onto the conversation row inside the same transaction as the
+  // message inserts — scoped by userId — so turn 2+ read it via the persisted
+  // path. The gateway does the catalog validation; startTurn trusts the pin.
+  describe('startTurn — send-frame pin persistence', () => {
+    it('persists the pin onto a brand-new (previously unpinned) conversation and returns it', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'hi',
+        pin: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+      });
+      // Returned pin pair reflects the just-persisted value.
+      expect(result.pinnedProvider).toBe('anthropic');
+      expect(result.pinnedModel).toBe('claude-haiku-4-5');
+      // Persisted onto the row.
+      const conv = prisma.conversations.find((c) => c.id === conversationId);
+      expect(conv?.pinnedProvider).toBe('anthropic');
+      expect(conv?.pinnedModel).toBe('claude-haiku-4-5');
+    });
+
+    it('overwrites an existing persisted pin with the send-frame pin', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const userId = randomUUID();
+      const conversationId = randomUUID();
+      prisma.users.push({ id: userId, email: 'u@t', passwordHash: 'x', createdAt: new Date() });
+      (prisma.conversations as unknown as Array<Record<string, unknown>>).push({
+        id: conversationId,
+        userId,
+        title: 'c',
+        createdAt: new Date(),
+        lastMessageAt: null,
+        pinnedProvider: 'openai',
+        pinnedModel: 'gpt-4o-mini',
+      });
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'hi',
+        pin: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+      });
+      expect(result.pinnedProvider).toBe('anthropic');
+      expect(result.pinnedModel).toBe('claude-haiku-4-5');
+      const conv = prisma.conversations.find((c) => c.id === conversationId);
+      expect(conv?.pinnedProvider).toBe('anthropic');
+      expect(conv?.pinnedModel).toBe('claude-haiku-4-5');
+    });
+
+    it('leaves the pin untouched when no send-frame pin is supplied', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const userId = randomUUID();
+      const conversationId = randomUUID();
+      prisma.users.push({ id: userId, email: 'u@t', passwordHash: 'x', createdAt: new Date() });
+      (prisma.conversations as unknown as Array<Record<string, unknown>>).push({
+        id: conversationId,
+        userId,
+        title: 'c',
+        createdAt: new Date(),
+        lastMessageAt: null,
+        pinnedProvider: 'openai',
+        pinnedModel: 'gpt-4o-mini',
+      });
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'hi',
+      });
+      // Persisted pin preserved (no pin arg → no write).
+      expect(result.pinnedProvider).toBe('openai');
+      expect(result.pinnedModel).toBe('gpt-4o-mini');
+      const conv = prisma.conversations.find((c) => c.id === conversationId);
+      expect(conv?.pinnedProvider).toBe('openai');
+      expect(conv?.pinnedModel).toBe('gpt-4o-mini');
+    });
+  });
+
   describe('failTurn', () => {
     it('sets status=failed, flushes partial content, and persists errorCode + status into the placeholder inferences row', async () => {
       const prisma = createInMemoryPrisma();

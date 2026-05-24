@@ -629,3 +629,285 @@ describe('ChatGateway.handleSend — SDK request threading', () => {
     expect(contents).toEqual(['first turn', 'second turn']);
   });
 });
+
+// chat-context-and-ux-polish (integration review — first-turn pin race). A
+// `send` frame can carry an explicit pin so the FIRST turn of a brand-new
+// conversation honors the picker selection. The gateway validates it against
+// the live catalog, threads it as THIS turn's SDK override, and persists it
+// onto the conversation row so turn 2+ flow through the persisted-pin path.
+// An explicit send-frame pin wins over the conversation's persisted pin.
+describe('ChatGateway.handleSend — send-frame pin (first-turn pin race)', () => {
+  // A catalog stub whose live entries cover the pins exercised below.
+  const liveCatalog: Partial<SdkCatalogAccessor> = {
+    listConfiguredProviders: () => [
+      {
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        promptPerMillion: 0,
+        completionPerMillion: 0,
+        contextWindow: 200_000,
+      },
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0,
+        completionPerMillion: 0,
+        contextWindow: 128_000,
+      },
+    ],
+  };
+
+  async function seedConv(
+    prisma: InMemoryPrisma,
+    pin: { pinnedProvider: string | null; pinnedModel: string | null },
+  ): Promise<{ userId: string; conversationId: string }> {
+    const userId = randomUUID();
+    const conversationId = randomUUID();
+    prisma.users.push({ id: userId, email: `${userId}@t`, passwordHash: 'x', createdAt: new Date() });
+    (prisma.conversations as unknown as Array<Record<string, unknown>>).push({
+      id: conversationId,
+      userId,
+      title: 't',
+      createdAt: new Date(),
+      lastMessageAt: null,
+      pinnedProvider: pin.pinnedProvider,
+      pinnedModel: pin.pinnedModel,
+    });
+    return { userId, conversationId };
+  }
+
+  it('valid pin on a NEW conversation: first turn carries the override AND the row ends pinned', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    const userId = randomUUID();
+    prisma.users.push({ id: userId, email: `${userId}@t`, passwordHash: 'x', createdAt: new Date() });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'anthropic',
+      pinnedModel: 'claude-haiku-4-5',
+    });
+    await tick();
+
+    // The SDK request for the FIRST turn carries the send-frame pin.
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]!.pin).toEqual({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+    });
+    // The freshly-minted conversation row ends with the pin persisted.
+    const conv = prisma.conversations.find((c) => c.userId === userId);
+    expect(conv?.pinnedProvider).toBe('anthropic');
+    expect(conv?.pinnedModel).toBe('claude-haiku-4-5');
+  });
+
+  it('valid pin on an EXISTING conversation: overrides AND updates the persisted pin', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    // Conversation already pinned to openai; the send frame repins to anthropic.
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      pinnedProvider: 'anthropic',
+      pinnedModel: 'claude-haiku-4-5',
+    });
+    await tick();
+
+    // Send-frame pin wins over the persisted pin for THIS turn.
+    expect(capturedRequests[0]!.pin).toEqual({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+    });
+    // And the persisted pin is updated to the new pin.
+    const conv = prisma.conversations.find((c) => c.id === conversationId);
+    expect(conv?.pinnedProvider).toBe('anthropic');
+    expect(conv?.pinnedModel).toBe('claude-haiku-4-5');
+  });
+
+  it('INVALID pin (not in live catalog): emits error+end(failed), turn not started, nothing persisted', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    const userId = randomUUID();
+    prisma.users.push({ id: userId, email: `${userId}@t`, passwordHash: 'x', createdAt: new Date() });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-unicorn-9000',
+    });
+    await tick();
+
+    // No SDK request: the turn was never started.
+    expect(capturedRequests).toHaveLength(0);
+    // error + end(failed) terminal with the invalid_pin code.
+    const types = client.sent.map((f) => f.type);
+    expect(types).toEqual(['error', 'end']);
+    const err = client.sent.find((f) => f.type === 'error')!;
+    expect(err.type === 'error' && err.errorCode).toBe('invalid_pin');
+    const end = client.sent.find((f) => f.type === 'end')!;
+    expect(end.type === 'end' && end.status).toBe('failed');
+    // Nothing persisted: no conversation, no messages, no inference.
+    expect(prisma.conversations).toHaveLength(0);
+    expect(prisma.messages).toHaveLength(0);
+    expect(prisma.inferences).toHaveLength(0);
+  });
+
+  it('INVALID pin on an EXISTING conversation: error+end, no SDK request, persisted pin untouched', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      pinnedProvider: 'anthropic',
+      pinnedModel: 'claude-unknown-0',
+    });
+    await tick();
+
+    expect(capturedRequests).toHaveLength(0);
+    const err = client.sent.find((f) => f.type === 'error')!;
+    expect(err.type === 'error' && err.errorCode).toBe('invalid_pin');
+    // The persisted pin is untouched (no partial write on rejection), and no
+    // messages were created.
+    const conv = prisma.conversations.find((c) => c.id === conversationId);
+    expect(conv?.pinnedProvider).toBe('openai');
+    expect(conv?.pinnedModel).toBe('gpt-4o-mini');
+    expect(prisma.messages).toHaveLength(0);
+  });
+
+  it('NO pin on the send frame: unchanged behavior — uses the persisted pin', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+
+    // Persisted pin is used; row unchanged.
+    expect(capturedRequests[0]!.pin).toEqual({ provider: 'openai', model: 'gpt-4o-mini' });
+    const conv = prisma.conversations.find((c) => c.id === conversationId);
+    expect(conv?.pinnedProvider).toBe('openai');
+    expect(conv?.pinnedModel).toBe('gpt-4o-mini');
+  });
+
+  it('NO pin on the send frame, unpinned conversation: Auto (no pin on the SDK request)', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, { catalog: liveCatalog });
+    const { userId, conversationId } = await seedConv(prisma, {
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    const client = fakeClient(userId);
+
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+
+    expect(capturedRequests[0]!.pin).toBeUndefined();
+  });
+});
+
+describe('ChatGateway.handleSend — history pass-through (Task 53/61)', () => {
+  async function seedPinnedConv(
+    prisma: InMemoryPrisma,
+    pin: { pinnedProvider: string | null; pinnedModel: string | null },
+  ): Promise<{ userId: string; conversationId: string }> {
+    const userId = randomUUID();
+    const conversationId = randomUUID();
+    prisma.users.push({ id: userId, email: `${userId}@t`, passwordHash: 'x', createdAt: new Date() });
+    (prisma.conversations as unknown as Array<Record<string, unknown>>).push({
+      id: conversationId,
+      userId,
+      title: 't',
+      createdAt: new Date(),
+      lastMessageAt: null,
+      pinnedProvider: pin.pinnedProvider,
+      pinnedModel: pin.pinnedModel,
+    });
+    return { userId, conversationId };
+  }
+
+  it('passes the multi-turn history (oldest first, streaming rows excluded) onto the SDK request', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma);
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    // Seed one earlier complete user message + one stale streaming row.
+    prisma.messages.push({
+      id: randomUUID(),
+      conversationId,
+      userId,
+      role: 'user',
+      content: 'first turn',
+      status: 'complete',
+      createdAt: new Date(Date.now() - 5_000),
+      completedAt: new Date(Date.now() - 4_900),
+    });
+    prisma.messages.push({
+      id: randomUUID(),
+      conversationId,
+      userId,
+      role: 'assistant',
+      content: 'stale partial',
+      status: 'streaming',
+      createdAt: new Date(Date.now() - 4_000),
+      completedAt: null,
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'second turn',
+    });
+    await tick();
+    const req = capturedRequests[0]!;
+    const contents = req.messages.map((m) => m.content);
+    expect(contents).toEqual(['first turn', 'second turn']);
+  });
+});
