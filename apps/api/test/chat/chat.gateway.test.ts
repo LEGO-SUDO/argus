@@ -387,6 +387,150 @@ describe('ChatGateway.handleSend — SDK request threading', () => {
     expect(inf?.errorCode).toBe('pinned_provider_unavailable');
   });
 
+  // chat-context-and-ux-polish (Codex review — gateway-level end-to-end
+  // lifecycle). The orchestrator-level tests cover the frame sequence, but the
+  // gateway boundary needs a full integration assertion that a `send` frame
+  // produces the entire WS sequence end-to-end with correct seqs + meta.
+  it('happy path: a send frame drives start@0 → metadata@1 → token@2 → end(complete) with meter fields', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, {
+      catalog: {
+        // Meter compute reads getEffectiveBudget; surface a budget so the end
+        // frame carries tokensBudget. (The conversation is unpinned.)
+        getEffectiveBudget: (configuredDefault) => configuredDefault,
+      },
+    });
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hello',
+    });
+    await tick();
+
+    const types = client.sent.map((f) => f.type);
+    expect(types).toEqual(['start', 'metadata', 'token', 'end']);
+    const seqs = client.sent.map((f) => ('seq' in f ? f.seq : -1));
+    expect(seqs).toEqual([0, 1, 2, 3]);
+    // metadata provider/model matches what the SDK's commit reported (the
+    // default stub commits mock/mock-1 for an unpinned conversation).
+    const meta = client.sent.find((f) => f.type === 'metadata')!;
+    expect(meta.type === 'metadata' && meta.providerMeta.provider).toBe('mock');
+    expect(meta.type === 'metadata' && meta.providerMeta.model).toBe('mock-1');
+    // end(complete) carries the meter fields.
+    const end = client.sent.find((f) => f.type === 'end')!;
+    expect(end.type === 'end' && end.status).toBe('complete');
+    expect(end.type === 'end' && typeof end.tokensUsed).toBe('number');
+    expect(end.type === 'end' && typeof end.tokensBudget).toBe('number');
+    // The assistant message persisted the full content.
+    expect(capturedRequests).toHaveLength(1);
+    const assistantMsg = prisma.messages.find(
+      (m) => m.role === 'assistant' && m.conversationId === conversationId,
+    );
+    expect(assistantMsg?.content).toBe('hi');
+    expect(assistantMsg?.status).toBe('complete');
+  });
+
+  // chat-context-and-ux-polish (Codex review — wire-protocol: leading empty
+  // token must not scramble seq). With a stubbed SDK that yields an empty
+  // token before "hello", the gateway emits start@0 → metadata@1 → token@2 with
+  // NO duplicate seq and NO leading empty token frame.
+  it('empty leading token: frames are start@0 → metadata@1 → token(hello)@2 → end@3 (no dup seq, no empty token)', async () => {
+    const prisma = createInMemoryPrisma();
+    // SDK stub that mirrors the router's commit-suppression contract: the
+    // commit fires immediately before the first NON-empty token; the leading
+    // empty token is suppressed by the router and never reaches the gateway.
+    const { gateway } = build(prisma, {
+      sdkStream: () => ({
+        async *[Symbol.asyncIterator](): AsyncIterator<ChatStreamChunk> {
+          yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          yield { type: 'token', content: 'hello' };
+          yield { type: 'done', providerMeta: { provider: 'mock', model: 'mock-1' } };
+        },
+      }),
+    });
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+
+    const types = client.sent.map((f) => f.type);
+    expect(types).toEqual(['start', 'metadata', 'token', 'end']);
+    const seqs = client.sent.map((f) => ('seq' in f ? f.seq : -1));
+    // No duplicate seq; metadata@1 strictly before token@2.
+    expect(seqs).toEqual([0, 1, 2, 3]);
+    // No empty token frame.
+    const tokenFrame = client.sent.find((f) => f.type === 'token')!;
+    expect(tokenFrame.type === 'token' && tokenFrame.content).toBe('hello');
+    expect(
+      client.sent.some((f) => f.type === 'token' && f.content === ''),
+    ).toBe(false);
+  });
+
+  // chat-context-and-ux-polish (Codex review — mid-stream failure lifecycle).
+  // After metadata + one token, a provider error fires error → end(failed):
+  // no meter fields on end, partial content persisted, no second metadata.
+  it('mid-stream failure: emits ...token → error → end(failed) with no meter fields and persists partial content', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway } = build(prisma, {
+      sdkStream: () => ({
+        async *[Symbol.asyncIterator](): AsyncIterator<ChatStreamChunk> {
+          yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          yield { type: 'token', content: 'partial' };
+          const e = new Error('mid-stream boom') as Error & { code: string };
+          e.code = 'provider_error';
+          throw e;
+        },
+      }),
+    });
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+
+    const types = client.sent.map((f) => f.type);
+    expect(types).toEqual(['start', 'metadata', 'token', 'error', 'end']);
+    // Exactly one metadata frame (no second after the error).
+    expect(client.sent.filter((f) => f.type === 'metadata')).toHaveLength(1);
+    const end = client.sent.find((f) => f.type === 'end')!;
+    expect(end.type === 'end' && end.status).toBe('failed');
+    // No meter fields on a failed end.
+    expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+    expect(end.type === 'end' && end.tokensBudget).toBeUndefined();
+    const err = client.sent.find((f) => f.type === 'error')!;
+    expect(err.type === 'error' && err.errorCode).toBe('provider_error');
+    // Partial content persisted to the assistant message.
+    const assistantMsg = prisma.messages.find(
+      (m) => m.role === 'assistant' && m.conversationId === conversationId,
+    );
+    expect(assistantMsg?.content).toBe('partial');
+    expect(assistantMsg?.status).toBe('failed');
+  });
+
   it('passes the multi-turn history (oldest first, streaming rows excluded) onto the SDK request (Task 53/61)', async () => {
     const prisma = createInMemoryPrisma();
     const { gateway, capturedRequests } = build(prisma);

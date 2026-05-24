@@ -5,11 +5,29 @@
 // api tests, which avoid @nestjs/testing for the same reason (keeps the
 // dependency graph tight and the assertion surface explicit).
 //
-// SessionGuard 401 behavior is covered by the existing
-// `apps/api/test/auth/session.guard.test.ts` suite and not duplicated here.
+// chat-context-and-ux-polish (Codex review — LLD Task 70 acceptance): the
+// endpoint MUST be session-guarded and an unauthenticated caller MUST get
+// 401. The previous suite only instantiated the controller directly (which
+// bypasses the guard), so it never proved the guard is wired. Below we assert
+// the @UseGuards(SessionGuard) metadata AND drive the guard against an
+// unauthenticated request to confirm the 401 contract — without pulling in
+// @nestjs/testing (kept out of the api test suite by convention).
+import {
+  UnauthorizedException,
+  UseGuards,
+  type ExecutionContext,
+} from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { ProvidersController } from '../../src/providers/providers.controller';
+import { SessionGuard } from '../../src/auth/session.guard';
+import { SESSION_COOKIE_NAME } from '../../src/common/session-cookie';
+import type { AuthService } from '../../src/auth/auth.service';
 import type { SdkCatalogAccessor } from '../../src/common/sdk-catalog.provider';
 import type { ConfiguredProviderEntry } from '@argus/sdk';
+
+// Silence the unused-import lint for the decorator we only reference for its
+// type identity in the metadata assertion.
+void UseGuards;
 
 interface StubResult {
   controller: ProvidersController;
@@ -76,5 +94,55 @@ describe('ProvidersController.list (Tasks 70/71/72/73)', () => {
     const { controller } = makeController([]);
     const result = controller.list();
     expect(result.providers).toEqual([]);
+  });
+});
+
+// chat-context-and-ux-polish (Codex review — LLD Task 70 acceptance).
+describe('ProvidersController — SessionGuard 401 (Task 70)', () => {
+  function buildCtx(
+    req: { cookies?: Record<string, string>; user?: { id: string } },
+  ): ExecutionContext {
+    return {
+      switchToHttp: () => ({
+        getRequest: () => req,
+        getResponse: () => ({}),
+        getNext: () => ({}),
+      }),
+    } as unknown as ExecutionContext;
+  }
+
+  it('is decorated with @UseGuards(SessionGuard)', () => {
+    // Class-level guard metadata — proves the guard is actually wired (a
+    // direct controller.list() call bypasses it, so this is the only way to
+    // assert the wiring without a full HTTP harness).
+    const guards = Reflect.getMetadata(GUARDS_METADATA, ProvidersController) as unknown[];
+    expect(guards).toBeDefined();
+    expect(guards).toContain(SessionGuard);
+  });
+
+  it('the guard rejects an unauthenticated request with 401 (no session cookie)', async () => {
+    const auth = { findUserBySessionToken: async () => null } as unknown as AuthService;
+    const guard = new SessionGuard(auth);
+    await expect(guard.canActivate(buildCtx({ cookies: {} }))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('the guard rejects a request whose cookie maps to no session with 401', async () => {
+    const auth = { findUserBySessionToken: async () => null } as unknown as AuthService;
+    const guard = new SessionGuard(auth);
+    await expect(
+      guard.canActivate(buildCtx({ cookies: { [SESSION_COOKIE_NAME]: 'stale' } })),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('the guard admits an authenticated request and the controller then lists', async () => {
+    const auth = { findUserBySessionToken: async () => 'user-1' } as unknown as AuthService;
+    const guard = new SessionGuard(auth);
+    const req = { cookies: { [SESSION_COOKIE_NAME]: 'good' } };
+    await expect(guard.canActivate(buildCtx(req))).resolves.toBe(true);
+    // Once past the guard, the controller serves the catalog.
+    const { controller } = makeController([]);
+    expect(controller.list().providers).toEqual([]);
   });
 });
