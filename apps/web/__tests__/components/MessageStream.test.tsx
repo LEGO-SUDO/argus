@@ -304,7 +304,7 @@ describe('MessageStream — omitted indicator', () => {
 });
 
 describe('MessageStream — provider/model label', () => {
-  it('renders provider and model on completed assistant message', () => {
+  it('renders provider and model on completed assistant message (sourced from metadata frame)', () => {
     const stub = makeStubClient();
     render(
       <MessageStream
@@ -321,8 +321,23 @@ describe('MessageStream — provider/model label', () => {
       model: 'gpt-4',
       seq: 0,
     });
-    stub.fire({ type: 'token', messageId: MSG_ID, seq: 1, content: 'ok' });
-    stub.fire({ type: 'end', messageId: MSG_ID, seq: 2, status: 'complete' });
+    // Metadata frame (post-commit) is the SOLE source of provider/model per
+    // HLD D1 + LLD Tasks 1-4. The start frame's provider/model are ignored
+    // by the reducer — emit a metadata frame so the chip and promoted
+    // message acquire the strings.
+    //
+    // Cast through `unknown` because `WsFrameOutbound` from
+    // `@argus/contracts` doesn't yet declare the metadata variant on this
+    // branch (backend worker owns that addition); the reducer accepts a
+    // widened `StreamFrame` internally.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4' },
+    } as unknown as WsFrameOutbound);
+    stub.fire({ type: 'token', messageId: MSG_ID, seq: 2, content: 'ok' });
+    stub.fire({ type: 'end', messageId: MSG_ID, seq: 3, status: 'complete' });
     // Both strings appear in the rendered tree.
     expect(screen.getByText(/openai/i)).toBeInTheDocument();
     expect(screen.getByText(/gpt-4/i)).toBeInTheDocument();
