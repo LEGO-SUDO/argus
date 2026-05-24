@@ -27,7 +27,21 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ApiError, authFetch } from './auth-fetch';
 import type { Message } from './message-stream-reducer';
-import type { MessageDto, MessageListResponse } from '@argus/contracts';
+import type {
+  MessageDto,
+  MessageListResponse,
+  PreviouslyPinned,
+} from '@argus/contracts';
+
+// ---------------------------------------------------------------------------
+// PinFallbackNotice — surfaced when the server falls back from a stale pin.
+//
+// Conforms to the `@argus/contracts` `PreviouslyPinned` shape ({ provider,
+// model }). The notice is shown when the messages-list response carries
+// `pinFallback === true`; its payload is the response's `previouslyPinned`
+// object naming the (now unavailable) pinned provider/model.
+// ---------------------------------------------------------------------------
+export type PinFallbackNotice = PreviouslyPinned;
 
 // Browser-only fetch for message history. We call `authFetch` directly
 // (rather than the shared `getMessages` in `conversations-api.ts`) so this
@@ -37,22 +51,62 @@ import type { MessageDto, MessageListResponse } from '@argus/contracts';
 //   "You're importing a component that needs 'server-only'"
 // even when the browser branch never reaches the server-only code path —
 // Webpack tracks the static import graph, not the runtime branch.
+type FetchResult = {
+  messages: MessageDto[];
+  omittedCount: number;
+  pinFallbackNotice?: PinFallbackNotice;
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
+  // Response-level token usage for the latest COMPLETED turn (HLD D5). The
+  // contract carries these at the response root (NOT per-message), so we
+  // thread them down and graft them onto the latest completed assistant row
+  // during mapping (see `mapHistory`).
+  tokensUsed?: number;
+  tokensBudget?: number;
+};
+
 async function fetchMessagesFromBrowser(
   conversationId: string,
-): Promise<{ messages: MessageDto[]; omittedCount: number }> {
+): Promise<FetchResult> {
   const res = await authFetch<MessageListResponse>(
     `/api/conversations/${conversationId}/messages`,
     { method: 'GET' },
   );
-  return {
+  const out: FetchResult = {
     messages: res.messages,
     omittedCount: res.omittedCount ?? 0,
   };
+  // Pin-fallback (contract: pinFallback boolean + previouslyPinned object).
+  // Only surface a notice when the server actually flagged a fallback AND
+  // named what was dropped — never invent a stale value.
+  if (res.pinFallback === true && res.previouslyPinned) {
+    out.pinFallbackNotice = res.previouslyPinned;
+  }
+  // Current pin travels on the embedded conversation DTO (contract: optional
+  // nullable pinnedProvider/pinnedModel on `ConversationDto`).
+  if (res.conversation) {
+    if (res.conversation.pinnedProvider !== undefined) {
+      out.pinnedProvider = res.conversation.pinnedProvider;
+    }
+    if (res.conversation.pinnedModel !== undefined) {
+      out.pinnedModel = res.conversation.pinnedModel;
+    }
+  }
+  if (typeof res.tokensUsed === 'number') {
+    out.tokensUsed = res.tokensUsed;
+  }
+  if (typeof res.tokensBudget === 'number') {
+    out.tokensBudget = res.tokensBudget;
+  }
+  return out;
 }
 
 type HistorySnapshot = {
   messages: Message[];
   omittedCount: number;
+  pinFallbackNotice?: PinFallbackNotice;
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 };
 
 // Module-level cache. Lives for the lifetime of the SPA session.
@@ -66,6 +120,16 @@ export type ConversationHistoryState =
       conversationId: string;
       messages: Message[];
       omittedCount: number;
+      /**
+       * Set when the server fell back from the stale pin on first hydration
+       * — drives the inline "previously pinned X / Y is unavailable" notice
+       * in MessageComposer. Cleared via `clearPinFallbackNotice`.
+       */
+      pinFallbackNotice?: PinFallbackNotice;
+      /** Current conversation pin — threaded to MessageComposer →
+       *  ProviderPicker (LLD Task 123-124). Absent/null means Auto. */
+      pinnedProvider?: string | null;
+      pinnedModel?: string | null;
     }
   | { status: 'error'; conversationId: string; error: Error };
 
@@ -101,12 +165,7 @@ export function useConversationHistory(
     if (!conversationId) return { status: 'idle' };
     const hit = cache.get(conversationId);
     if (hit) {
-      return {
-        status: 'ready',
-        conversationId,
-        messages: hit.messages,
-        omittedCount: hit.omittedCount,
-      };
+      return readySnapshotFrom(conversationId, hit);
     }
     if (skipForRef.current?.has(conversationId)) {
       return {
@@ -139,12 +198,7 @@ export function useConversationHistory(
     // Cache hit — synchronously return.
     const hit = cache.get(conversationId);
     if (hit) {
-      setState({
-        status: 'ready',
-        conversationId,
-        messages: hit.messages,
-        omittedCount: hit.omittedCount,
-      });
+      setState(readySnapshotFrom(conversationId, hit));
       return;
     }
 
@@ -156,16 +210,22 @@ export function useConversationHistory(
         const result = await fetchMessagesFromBrowser(conversationId);
         if (cancelled) return;
         const snapshot: HistorySnapshot = {
-          messages: result.messages.map(toReducerMessage),
+          messages: mapHistory(result),
           omittedCount: result.omittedCount,
+          // Only set the notice when the response actually carried one — do
+          // not invent a stale value (Task 31-32).
+          ...(result.pinFallbackNotice
+            ? { pinFallbackNotice: result.pinFallbackNotice }
+            : {}),
+          ...(result.pinnedProvider !== undefined
+            ? { pinnedProvider: result.pinnedProvider }
+            : {}),
+          ...(result.pinnedModel !== undefined
+            ? { pinnedModel: result.pinnedModel }
+            : {}),
         };
         cache.set(conversationId, snapshot);
-        setState({
-          status: 'ready',
-          conversationId,
-          messages: snapshot.messages,
-          omittedCount: snapshot.omittedCount,
-        });
+        setState(readySnapshotFrom(conversationId, snapshot));
       } catch (err) {
         if (cancelled) return;
         // ApiError 404 means the user doesn't own this conversation (or it
@@ -207,15 +267,104 @@ export function primeConversationHistoryCache(
   });
 }
 
+/**
+ * Removes the `pinFallbackNotice` from the cache entry for the given
+ * conversation, leaving `messages` and `omittedCount` intact. Used by
+ * MessageComposer's dismiss control; the cache mutation persists across
+ * hook re-renders so the notice does NOT re-show on subsequent mounts.
+ *
+ * No-op if the conversation has no cache entry yet.
+ */
+export function clearPinFallbackNotice(conversationId: string): void {
+  const entry = cache.get(conversationId);
+  if (!entry) return;
+  if (entry.pinFallbackNotice === undefined) return;
+  // Mutate-in-place by writing a fresh entry that preserves every other
+  // field — keeps the API surface "delete just the notice" while preserving
+  // messages, omittedCount, and the current pin (Task 29-30).
+  const next: HistorySnapshot = {
+    messages: entry.messages,
+    omittedCount: entry.omittedCount,
+    ...(entry.pinnedProvider !== undefined
+      ? { pinnedProvider: entry.pinnedProvider }
+      : {}),
+    ...(entry.pinnedModel !== undefined
+      ? { pinnedModel: entry.pinnedModel }
+      : {}),
+  };
+  cache.set(conversationId, next);
+}
+
 /** Test-only — reset the module cache between tests. */
 export function _resetConversationHistoryCacheForTests(): void {
   cache.clear();
 }
 
+/**
+ * Build a `ready` snapshot from a cache/fetch HistorySnapshot. Centralised
+ * because both the lazy-init path and the post-fetch path need the same
+ * shape (and need to omit `pinFallbackNotice` when unset rather than write
+ * `undefined`, so the consumer's truthy check stays simple).
+ */
+function readySnapshotFrom(
+  conversationId: string,
+  snapshot: HistorySnapshot,
+): ConversationHistoryState {
+  return {
+    status: 'ready' as const,
+    conversationId,
+    messages: snapshot.messages,
+    omittedCount: snapshot.omittedCount,
+    // Spread the optional fields only when set so the consumer's truthy
+    // checks stay simple (no stray `undefined` keys).
+    ...(snapshot.pinFallbackNotice
+      ? { pinFallbackNotice: snapshot.pinFallbackNotice }
+      : {}),
+    ...(snapshot.pinnedProvider !== undefined
+      ? { pinnedProvider: snapshot.pinnedProvider }
+      : {}),
+    ...(snapshot.pinnedModel !== undefined
+      ? { pinnedModel: snapshot.pinnedModel }
+      : {}),
+  };
+}
+
+/**
+ * Map the fetched history into reducer `Message[]`, grafting the
+ * response-level token usage onto the latest COMPLETED assistant row.
+ *
+ * The contract (HLD D5) carries `tokensUsed`/`tokensBudget` at the response
+ * ROOT — they describe the latest completed turn, not any single message DTO
+ * (which has no token fields). The `ContextMeter` host in `MessageStream`
+ * scans backwards for the most-recent completed assistant message and reads
+ * its tokens, so we attach the response figures there. This makes a resumed
+ * conversation paint the meter on first render (LLD Task 97 fallback) without
+ * lifting meter state out of the reducer.
+ */
+function mapHistory(result: FetchResult): Message[] {
+  const messages = result.messages.map(toReducerMessage);
+  if (
+    typeof result.tokensUsed === 'number' &&
+    typeof result.tokensBudget === 'number'
+  ) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === 'assistant' && m.status === 'complete') {
+        m.tokensUsed = result.tokensUsed;
+        m.tokensBudget = result.tokensBudget;
+        break;
+      }
+    }
+  }
+  return messages;
+}
+
 function toReducerMessage(dto: MessageDto): Message {
   // Mirror of the mapper that previously lived in
   // `app/chat/[conversationId]/page.tsx`. Kept here so the client-side
-  // hydration path stays self-contained.
+  // hydration path stays self-contained. Token usage is NOT per-message in
+  // the contract — it rides the response root and is grafted on in
+  // `mapHistory`.
   const m: Message = {
     id: dto.id,
     role: dto.role,

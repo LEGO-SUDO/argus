@@ -39,11 +39,35 @@ export interface StartTurnInput {
    * single-call API for non-gateway callers).
    */
   assistantMessageId?: string;
+  /**
+   * chat-context-and-ux-polish (integration review — first-turn pin race).
+   * Optional pin carried on the WS `send` frame. When present, it is persisted
+   * onto the conversation row INSIDE the startTurn transaction (atomic with the
+   * message inserts, scoped by userId like every other conversations write) so
+   * turn 2+ flow through the existing persisted-pin path. The gateway validates
+   * the pin against the live catalog BEFORE calling startTurn, so this is
+   * trusted by the time it reaches here. The returned pin pair reflects the
+   * just-persisted value.
+   */
+  pin?: { provider: string; model: string };
+}
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
 }
 
 export interface StartTurnResult {
   userMessageId: string;
   assistantMessageId: string;
+  // chat-context-and-ux-polish LLD Task 53 — multi-turn history (oldest
+  // first, streaming rows excluded) the gateway threads into the SDK
+  // request's `messages` field so the model actually sees prior turns.
+  history?: ChatHistoryMessage[];
+  // LLD Task 53 — pin pair from the conversation row, surfaced here so the
+  // gateway can build the SDK request's `pin` without a second query.
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 }
 
 /**
@@ -85,7 +109,17 @@ export class ChatService {
     const assistantMessageId = input.assistantMessageId ?? this.mintMessageId();
     const now = new Date();
 
-    await this.prisma.db.$transaction(async (tx) => {
+    // chat-context-and-ux-polish (Codex review — concurrent-sends history
+    // contamination). The user-message insert AND the history read MUST live
+    // in the SAME transaction. Previously the history read ran in a separate
+    // query after the transaction committed, so two concurrent sends on the
+    // same conversation could interleave: send-B's user message could land
+    // between send-A's insert and send-A's read, polluting send-A's threaded
+    // history with send-B's not-yet-its-turn user message. Reading inside the
+    // transaction sees only this turn's own insert plus all committed-before
+    // messages (the in-flight peer's insert is in a separate, uncommitted
+    // transaction and is therefore invisible).
+    const txResult = await this.prisma.db.$transaction(async (tx) => {
       // 1. User message — status `complete` immediately; nothing further
       //    happens to it.
       await tx.message.create({
@@ -132,9 +166,62 @@ export class ChatService {
           startedAt: now,
         },
       });
+
+      // 4b. chat-context-and-ux-polish (integration review — first-turn pin
+      //     race). Persist the send-frame pin onto the conversation row INSIDE
+      //     the transaction so it's atomic with the message inserts. updateMany
+      //     scoped by (id, userId) so the write respects the same ownership
+      //     guard as every other conversations write (and is a no-op for a
+      //     foreign conversation — though startTurn already authz-checked
+      //     above). Persisting here means the re-read in step 6 returns the
+      //     fresh pin, and turn 2+ pick it up via the persisted-pin path.
+      if (input.pin) {
+        await tx.conversation.updateMany({
+          where: { id: input.conversationId, userId: input.userId },
+          data: {
+            pinnedProvider: input.pin.provider,
+            pinnedModel: input.pin.model,
+          },
+        });
+      }
+
+      // 5. LLD Task 53 — load the multi-turn history INSIDE the transaction,
+      //    after the user-message insert, so the new user message is included
+      //    but a concurrent peer's user message is NOT. Streaming-status rows
+      //    are excluded — the assistant placeholder we just inserted is still
+      //    streaming, and any crashed prior assistant row would otherwise leak
+      //    empty/partial content into the next prompt. Order: chronological.
+      const historyRows = (await tx.message.findMany({
+        where: {
+          conversationId: input.conversationId,
+          userId: input.userId,
+          status: { in: ['complete', 'canceled', 'failed'] },
+        },
+        orderBy: { createdAt: 'asc' },
+      })) as Array<{ role: string; content: string }>;
+
+      // 6. Re-read the conversation row (already authz-checked above) for the
+      //    pin pair so the gateway doesn't need a second query — inside the
+      //    transaction for a consistent snapshot.
+      const pinned = (await tx.conversation.findFirst({
+        where: { id: input.conversationId, userId: input.userId },
+      })) as { pinnedProvider?: string | null; pinnedModel?: string | null } | null;
+
+      return { historyRows, pinned };
     });
 
-    return { userMessageId, assistantMessageId };
+    const history: ChatHistoryMessage[] = txResult.historyRows.map((m) => ({
+      role: m.role as 'user' | 'assistant' | 'system',
+      content: m.content,
+    }));
+
+    return {
+      userMessageId,
+      assistantMessageId,
+      history,
+      pinnedProvider: txResult.pinned?.pinnedProvider ?? null,
+      pinnedModel: txResult.pinned?.pinnedModel ?? null,
+    };
   }
 
   async completeTurn(messageId: string, content: string): Promise<void> {

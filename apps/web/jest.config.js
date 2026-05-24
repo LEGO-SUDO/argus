@@ -30,13 +30,68 @@ module.exports = {
     '^server-only$': '<rootDir>/__mocks__/server-only.js',
   },
   transform: {
+    // ts-jest for our own TS/TSX sources.
     '^.+\\.(ts|tsx)$': [
       'ts-jest',
       {
         tsconfig: '<rootDir>/tsconfig.test.json',
       },
     ],
+    // The markdown stack (react-markdown, remark-*, rehype-*, and their
+    // unified/micromark/hast/mdast transitive deps) ships ESM-only. We
+    // transform those node_modules .js to CommonJS via ts-jest so jest's CJS
+    // runtime can require them. isolatedModules keeps it fast (no type-check
+    // of node_modules) and allowJs lets ts-jest accept plain .js input.
+    '^.+\\.(js|mjs)$': [
+      'ts-jest',
+      {
+        tsconfig: '<rootDir>/tsconfig.test.json',
+        isolatedModules: true,
+        diagnostics: false,
+      },
+    ],
   },
+  // Do NOT ignore the ESM markdown ecosystem under pnpm's store — those .js
+  // files must be transformed to CommonJS. The negative lookahead lists the
+  // unified/remark/rehype/mdast/micromark/hast families plus their small
+  // single-purpose helper deps. Everything else in node_modules stays
+  // ignored for speed.
+  transformIgnorePatterns: [
+    'node_modules/\\.pnpm/(?!(' +
+      [
+        'react-markdown',
+        'remark-[^/@]+',
+        'rehype-[^/@]+',
+        'mdast-[^/@]+',
+        'micromark[^/@]*',
+        'unified',
+        'unist-[^/@]+',
+        'hast-[^/@]+',
+        'hastscript',
+        'property-information',
+        '[a-z]+-separated-tokens',
+        'vfile[^/@]*',
+        'bail',
+        'trough',
+        'is-plain-obj',
+        'trim-lines',
+        'decode-named-character-reference',
+        'character-entities[^/@]*',
+        'devlop',
+        'html-url-attributes',
+        'estree-util-is-identifier-name',
+        'ccount',
+        'escape-string-regexp',
+        'markdown-table',
+        'longest-streak',
+        'zwitch',
+        'html-void-elements',
+        'web-namespaces',
+        'character-reference-invalid',
+        'is-[^/@]+',
+      ].join('|') +
+      ')@)',
+  ],
   testEnvironmentOptions: {
     customExportConditions: [''],
   },

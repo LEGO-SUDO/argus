@@ -85,6 +85,22 @@ describe('OpenAIProvider', () => {
     });
   });
 
+  it('uses req.pin.model in the outbound create() call, overriding env/default (Codex review #1)', async () => {
+    const stream = asyncIterableOf([chunkOf('hi', { prompt_tokens: 1, completion_tokens: 1 })]);
+    const create = jest.fn().mockResolvedValue(stream);
+    const client = { chat: { completions: { create } } };
+    // No model opt and no env — would default to gpt-4o-mini without the pin.
+    const provider = new OpenAIProvider({ apiKey: 'sk-test', client: client as never });
+    const chunks = await collect(
+      provider.stream(makeReq({ pin: { provider: 'openai', model: 'gpt-4o' } })),
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0].model).toBe('gpt-4o');
+    // The done frame reports the pinned model too.
+    const done = chunks.find((c) => c.type === 'done');
+    expect(done && done.type === 'done' && done.providerMeta.model).toBe('gpt-4o');
+  });
+
   it('maps an AuthenticationError to ProviderError(auth_failed) before first token', async () => {
     const authErr = new AuthenticationError(401, undefined, 'bad key', undefined);
     const client = {

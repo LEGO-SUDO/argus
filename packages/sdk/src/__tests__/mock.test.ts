@@ -70,6 +70,27 @@ describe('MockProvider determinism', () => {
     expect(done.providerMeta.completionTokens).toBeGreaterThan(0);
   });
 
+  it('uses req.pin.model on the done providerMeta, overriding MOCK_MODEL/default (Codex review #1)', async () => {
+    const prevMockModel = process.env.MOCK_MODEL;
+    delete process.env.MOCK_MODEL;
+    try {
+      const provider = new MockProvider();
+      const chunks: unknown[] = [];
+      for await (const c of provider.stream(
+        makeReq({ pin: { provider: 'mock', model: 'mock-pinned' } }),
+      )) {
+        chunks.push(c);
+      }
+      const done = chunks[chunks.length - 1] as {
+        type: string;
+        providerMeta: { model: string };
+      };
+      expect(done.providerMeta.model).toBe('mock-pinned');
+    } finally {
+      if (prevMockModel !== undefined) process.env.MOCK_MODEL = prevMockModel;
+    }
+  });
+
   it('honors signal abort between tokens', async () => {
     const ac = new AbortController();
     const provider = new MockProvider();

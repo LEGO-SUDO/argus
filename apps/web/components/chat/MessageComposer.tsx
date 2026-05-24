@@ -33,6 +33,17 @@ import {
   type KeyboardEvent,
 } from 'react';
 
+import { ApiError } from '@/lib/auth-fetch';
+import {
+  clearConversationPin,
+  patchConversationPin,
+  type ProviderCatalog,
+} from '@/lib/providers-api';
+import { clearPinFallbackNotice } from '@/lib/use-conversation-history';
+import type { PinFallbackNotice } from '@/lib/use-conversation-history';
+import { useFocusComposer } from '@/lib/use-focus-composer';
+import { ProviderPicker } from './ProviderPicker';
+
 type MessageComposerProps = {
   /** True while the reducer holds the composer lock (turn in flight OR
    *  socket dead). Disables the textarea and the Send button. */
@@ -40,13 +51,41 @@ type MessageComposerProps = {
   /** True while a turn is actively streaming. When true the Send button
    *  is swapped for a Cancel button. Always implies `disabled` too. */
   streaming?: boolean;
-  /** Number of providers the gateway has configured. Surfaced in the pill
-   *  chip — see lib/conversations-api in a future iteration. Defaults to
-   *  1 (mock provider) to keep the chip honest until the API surfaces a
-   *  real count. */
+  /** Number of providers the gateway has configured. Surfaced in the legacy
+   *  pill chip — only rendered when no `catalog` prop is supplied (i.e. the
+   *  pre-ProviderPicker call shape). Defaults to 1. */
   providersConfigured?: number;
-  onSend: (text: string) => void;
+  /**
+   * Submit the message. On the FIRST turn of a brand-new conversation
+   * (`conversationId === null`) the composer also passes the currently-chosen
+   * pin so the host can carry it on the WS `send` frame — the gateway then
+   * persists it for the freshly-minted conversation (design review FIX 7).
+   * `pin` is undefined for Auto or for any turn on an existing conversation
+   * (where pin changes go via PATCH instead). It is only ever a complete pair
+   * (both provider + model non-empty) — never a partial/null pin.
+   */
+  onSend: (text: string, pin?: { provider: string; model: string }) => void;
   onCancel?: () => void;
+
+  // ----- ProviderPicker wiring (LLD Block G2/G3). All optional so legacy
+  // call sites (and tests) that don't pass a catalog keep the old pills. -----
+
+  /** Active conversation id — needed to PATCH the pin and to drive the
+   *  focus hook. Null on the new-conversation surface. */
+  conversationId?: string | null;
+  /** Provider catalog from `fetchProviderCatalog`. When present the static
+   *  pills are replaced by the ProviderPicker. */
+  catalog?: ProviderCatalog;
+  /** True while the catalog fetch is in flight — drives the picker's
+   *  disabled-loading state (vs the env-var empty-state). Codex finding #6. */
+  catalogLoading?: boolean;
+  /** Current conversation pin (from useConversationHistory). */
+  pinnedProvider?: string | null;
+  /** Current conversation pin model. */
+  pinnedModel?: string | null;
+  /** Inline "previously-pinned model unavailable" notice (first paint of a
+   *  resumed conversation whose stale pin fell back). */
+  pinFallbackNotice?: PinFallbackNotice;
 };
 
 const MIN_HEIGHT_PX = 44;
@@ -58,9 +97,139 @@ export function MessageComposer({
   providersConfigured = 1,
   onSend,
   onCancel,
+  conversationId = null,
+  catalog,
+  catalogLoading = false,
+  pinnedProvider = null,
+  pinnedModel = null,
+  pinFallbackNotice,
 }: MessageComposerProps) {
   const [text, setText] = useState('');
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Auto-focus the composer on mount, on streaming-lock release, and on
+  // conversation switch (LLD Task 140 / Block C).
+  useFocusComposer({ ref: taRef, streaming, disabled, conversationId });
+
+  // ----- Optimistic pin state (LLD Tasks 125-130). -----
+  // The picker reflects the local optimistic pin immediately; on PATCH
+  // failure we roll back to the previous values and surface an inline error.
+  type PinPair = { provider: string | null; model: string | null };
+  const [optimisticPin, setOptimisticPin] = useState<PinPair>({
+    provider: pinnedProvider,
+    model: pinnedModel,
+  });
+  // Keep the optimistic pin in sync when the upstream prop changes (e.g. a
+  // resumed conversation hydrates with a different pin). Resync on prop pair
+  // change so a successful optimistic update isn't clobbered by the same value.
+  useEffect(() => {
+    setOptimisticPin({ provider: pinnedProvider, model: pinnedModel });
+  }, [pinnedProvider, pinnedModel]);
+
+  const [pinError, setPinError] = useState<string | null>(null);
+  // PATCH-in-flight flag — disables the picker so rapid changes can't race
+  // (Codex finding #4). A request token sequences resolutions so a stale
+  // PATCH that resolves out of order can never roll back to old state.
+  const [pinBusy, setPinBusy] = useState(false);
+  const pinRequestSeq = useRef(0);
+
+  // First-turn pin (Codex finding #1 → design review FIX 7). Before the
+  // conversation is minted (`conversationId === null`) there is no row to
+  // PATCH, so the chosen pin is simply reflected in `optimisticPin`. On submit
+  // the composer hands that pin to `onSend`, which carries it on the WS `send`
+  // frame; the gateway honors it for the first turn AND persists it onto the
+  // freshly-minted conversation row. So the OLD post-mint PATCH for the
+  // pre-send-pin path is gone — it raced the first turn (the gateway had
+  // already streamed with Auto by the time the PATCH landed) and is now
+  // redundant. In-conversation pin changes still go via PATCH below.
+
+  // Apply a pin PATCH against a known conversation id with optimistic update,
+  // request sequencing, busy-gating, and rollback-on-failure. `next` is the
+  // target pin (both null → clear). `previous` is what we roll back to.
+  const applyPinPatch = useCallback(
+    (id: string, next: PinPair, previous: PinPair) => {
+      const seq = ++pinRequestSeq.current;
+      setOptimisticPin(next);
+      setPinError(null);
+      setPinBusy(true);
+      const isClear = next.provider === null || next.model === null;
+      const req = isClear
+        ? clearConversationPin(id)
+        : patchConversationPin(id, {
+            pinnedProvider: next.provider as string,
+            pinnedModel: next.model as string,
+          });
+      void req
+        .then(() => {
+          // Only the latest request may settle the busy flag (an earlier,
+          // slower PATCH resolving late must not flip busy off while a newer
+          // one is still pending).
+          if (seq === pinRequestSeq.current) setPinBusy(false);
+        })
+        .catch((err: unknown) => {
+          // Stale failure — a newer request supersedes it; ignore so we don't
+          // roll back to state the newer request already moved past.
+          if (seq !== pinRequestSeq.current) return;
+          setPinBusy(false);
+          setOptimisticPin(previous);
+          setPinError(
+            isClear
+              ? err instanceof ApiError
+                ? `Could not switch to Auto (${err.code ?? err.status}).`
+                : 'Could not switch to Auto. Please try again.'
+              : err instanceof ApiError
+                ? `Could not pin model (${err.code ?? err.status}).`
+                : 'Could not pin model. Please try again.',
+          );
+        });
+    },
+    [],
+  );
+
+  const handlePin = useCallback(
+    (provider: string, model: string) => {
+      const previous = optimisticPin;
+      if (!conversationId) {
+        // Pre-send: no row to PATCH yet. Reflect the choice immediately; it
+        // is carried on the next `send` frame (FIX 7), not PATCHed.
+        setOptimisticPin({ provider, model });
+        setPinError(null);
+        return;
+      }
+      applyPinPatch(conversationId, { provider, model }, previous);
+    },
+    [conversationId, optimisticPin, applyPinPatch],
+  );
+
+  const handleClear = useCallback(() => {
+    const previous = optimisticPin;
+    if (!conversationId) {
+      // Pre-send clear → back to Auto locally; the next send simply omits the
+      // pin (Auto), so there's nothing to cancel/PATCH.
+      setOptimisticPin({ provider: null, model: null });
+      setPinError(null);
+      return;
+    }
+    applyPinPatch(conversationId, { provider: null, model: null }, previous);
+  }, [conversationId, optimisticPin, applyPinPatch]);
+
+  // ----- Inline pin-fallback notice dismissal (LLD Tasks 132-139). -----
+  // The notice is sourced from the prop (cache-backed); dismissal calls the
+  // cache helper so it doesn't re-show on the next render. We do NOT keep a
+  // separate local "hidden" flag — the cache mutation is the single source
+  // of truth (Task 139). To reflect the dismissal within this mount (the
+  // prop won't change until the hook re-reads the cache), we track the id we
+  // dismissed for and suppress rendering for that id.
+  const [dismissedForId, setDismissedForId] = useState<string | null>(null);
+  const noticeVisible =
+    pinFallbackNotice !== undefined && dismissedForId !== conversationId;
+
+  const handleDismissNotice = useCallback(() => {
+    if (conversationId) {
+      clearPinFallbackNotice(conversationId);
+      setDismissedForId(conversationId);
+    }
+  }, [conversationId]);
 
   // Auto-grow the textarea to fit content, clamped between MIN/MAX. Runs on
   // every text change; resetting to `auto` first is critical so shrink
@@ -82,9 +251,20 @@ export function MessageComposer({
   const submit = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || disabled) return;
-    onSend(trimmed);
+    // First-turn pin (FIX 7): on a brand-new conversation (no id yet) carry
+    // the chosen pin on the send so the gateway honors it for THIS turn and
+    // persists it onto the freshly-minted row. Only a complete pair is sent;
+    // Auto (no pin) sends nothing. For an EXISTING conversation, pin changes
+    // already went via PATCH, so we don't carry it here.
+    const carryPin =
+      conversationId === null &&
+      optimisticPin.provider !== null &&
+      optimisticPin.model !== null
+        ? { provider: optimisticPin.provider, model: optimisticPin.model }
+        : undefined;
+    onSend(trimmed, carryPin);
     setText('');
-  }, [disabled, onSend, text]);
+  }, [conversationId, disabled, onSend, optimisticPin, text]);
 
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -113,6 +293,34 @@ export function MessageComposer({
           'linear-gradient(to bottom, transparent, var(--chat-bg) 24%)',
       }}
     >
+      {/* Inline "previously-pinned model unavailable" notice (LLD Block G3).
+       *  Sits above the composer body; dismissable via the cache helper so it
+       *  doesn't re-show on the next render. */}
+      {noticeVisible && pinFallbackNotice ? (
+        <div
+          data-testid="pin-fallback-notice"
+          role="status"
+          className="mx-auto mb-2 flex max-w-[720px] items-start justify-between gap-2 rounded-[8px] border border-chat-rule bg-chat-panel px-3 py-2 text-[12px] text-chat-ink-2"
+        >
+          <span>
+            Previously pinned{' '}
+            <span className="mono text-chat-ink">
+              {pinFallbackNotice.provider} · {pinFallbackNotice.model}
+            </span>{' '}
+            is unavailable — switched to Auto.
+          </span>
+          <button
+            type="button"
+            data-testid="pin-fallback-notice-dismiss"
+            aria-label="Dismiss notice"
+            onClick={handleDismissNotice}
+            className="shrink-0 rounded-[4px] px-1 text-chat-ink-3 transition-colors hover:text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+
       <form
         onSubmit={handleSubmit}
         data-testid="message-composer"
@@ -145,22 +353,51 @@ export function MessageComposer({
 
         <div className="flex items-center justify-between pt-1.5">
           <div className="flex items-center gap-1.5 text-[12px] text-chat-ink-3">
-            <span
-              data-testid="message-composer-provider-pill"
-              className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
-            >
-              <span className="prov" data-prov="mock">
-                <span className="swatch" aria-hidden="true" />
+            {catalog ? (
+              // LLD Task 126 — ProviderPicker replaces the static pills once
+              // the catalog is wired in. Reflects the optimistic pin; pin
+              // failures roll back + surface the inline error below.
+              <ProviderPicker
+                catalog={catalog}
+                pinnedProvider={optimisticPin.provider}
+                pinnedModel={optimisticPin.model}
+                onPin={handlePin}
+                onClear={handleClear}
+                streaming={streaming}
+                loading={catalogLoading}
+                busy={pinBusy}
+              />
+            ) : (
+              // Legacy static pills — kept for call sites that don't yet pass
+              // a catalog (and the pre-existing composer tests).
+              <>
+                <span
+                  data-testid="message-composer-provider-pill"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
+                >
+                  <span className="prov" data-prov="mock">
+                    <span className="swatch" aria-hidden="true" />
+                  </span>
+                  auto-failover
+                </span>
+                <span
+                  data-testid="message-composer-providers-count"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
+                >
+                  {providersConfigured} provider
+                  {providersConfigured === 1 ? '' : 's'} configured
+                </span>
+              </>
+            )}
+            {pinError ? (
+              <span
+                data-testid="pin-error-notice"
+                role="alert"
+                className="text-[11.5px] text-err"
+              >
+                {pinError}
               </span>
-              auto-failover
-            </span>
-            <span
-              data-testid="message-composer-providers-count"
-              className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
-            >
-              {providersConfigured} provider
-              {providersConfigured === 1 ? '' : 's'} configured
-            </span>
+            ) : null}
           </div>
 
           {streaming ? (

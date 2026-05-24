@@ -54,6 +54,16 @@ export const USER_SCOPED_REPO_METHODS: UserScopedInvocation[] = [
     invoke: async (repos, userId, ctx) => repos.conversations.rename(ctx.conversationId, userId, 'x'),
     empty: false,
   },
+  // chat-context-and-ux-polish LLD Task 75 — generalized update method;
+  // preserves the per-user authz filter (verified here for the title-only
+  // patch since pin fields take the same code path).
+  {
+    repository: 'conversations',
+    method: 'update',
+    invoke: async (repos, userId, ctx) =>
+      repos.conversations.update(ctx.conversationId, userId, { title: 'x' }),
+    empty: false,
+  },
   {
     repository: 'conversations',
     method: 'delete',
@@ -86,7 +96,7 @@ export const USER_SCOPED_REPO_METHODS: UserScopedInvocation[] = [
 export const REPOSITORY_PUBLIC_METHODS: Record<'conversations' | 'messages', string[]> = {
   // `create` is a write that takes userId explicitly — covered by
   // conversations.repository.test (Task 24a).
-  conversations: ['listForUser', 'getByIdForUser', 'create', 'rename', 'delete'],
+  conversations: ['listForUser', 'getByIdForUser', 'create', 'rename', 'update', 'delete'],
   messages: ['listForConversation', 'getById'],
 };
 

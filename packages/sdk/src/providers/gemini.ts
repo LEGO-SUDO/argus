@@ -60,12 +60,26 @@ export class GeminiAdapter implements ProviderAdapter {
     return Boolean(this.opts.apiKey ?? process.env.GOOGLE_API_KEY);
   }
 
+  // LLD Task 23 — Gemini model ids advertised to the picker. Matches the
+  // gemini:* keys in cost.ts PRICEBOOK (3-flash-preview, 2.0-flash-exp,
+  // 1.5-flash, 1.5-pro).
+  listModels(): string[] {
+    return [
+      'gemini-3-flash-preview',
+      'gemini-2.0-flash-exp',
+      'gemini-1.5-flash',
+      'gemini-1.5-pro',
+    ];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
     const apiKey = this.opts.apiKey ?? process.env.GOOGLE_API_KEY;
     if (!apiKey) {
       throw new ProviderError('provider_not_configured', 'GOOGLE_API_KEY not set');
     }
-    const model = this.opts.model ?? process.env.GOOGLE_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
+    // opts/env/default. See the matching comment in providers/openai.ts.
+    const model = req.pin?.model ?? this.opts.model ?? process.env.GOOGLE_MODEL ?? DEFAULT_MODEL;
     const endpoint = this.opts.endpoint ?? ENDPOINT;
     const fetchImpl = this.opts.fetchImpl ?? fetch;
 

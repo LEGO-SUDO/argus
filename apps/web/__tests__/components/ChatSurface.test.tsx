@@ -19,6 +19,20 @@ import { act, render, screen } from '@testing-library/react';
 import { ChatSurface } from '@/components/chat/ChatSurface';
 import { _resetConversationHistoryCacheForTests } from '@/lib/use-conversation-history';
 
+// Flush all pending microtasks (history fetch + catalog fetch resolutions)
+// inside act() so React state updates are batched and the "not wrapped in
+// act(...)" warning doesn't fire. Two awaits because the catalog fetch chains
+// `.then(...)` after the promise resolves (one tick to resolve, one to run the
+// continuation). This is NOT papering over a bug — both fetches are genuinely
+// async and the component handles them via useEffect; the test just needs to
+// drive them to completion before asserting.
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 const CONV_ID = '22222222-2222-4222-8222-222222222222';
 const OTHER_CONV_ID = '99999999-9999-4999-8999-999999999999';
 
@@ -62,38 +76,53 @@ function stubHistory(
   authFetchMock.mockResolvedValueOnce({ messages, omittedCount });
 }
 
+// ChatSurface fetches the provider catalog on mount (LLD Task 120). Mock the
+// helper so existing tests don't issue a real request; default to an empty
+// catalog (resolved) in beforeEach below.
+const fetchProviderCatalogMock = jest.fn();
+jest.mock('@/lib/providers-api', () => {
+  const actual = jest.requireActual('@/lib/providers-api') as object;
+  return {
+    __esModule: true,
+    ...actual,
+    fetchProviderCatalog: (...args: unknown[]) =>
+      fetchProviderCatalogMock(...args),
+  };
+});
+
 // Render counter — assigned a fresh instance id per MessageStream mount so
 // we can detect remounts across rerenders. The mock also captures the
 // latest `onConversationMinted` callback so individual tests can simulate
 // the WS start-frame flow.
 let mountCount = 0;
 let latestOnMinted: ((id: string) => void) | undefined;
-const propsLog: Array<{
+type CatalogLike = { providers: unknown[] };
+type StreamProps = {
   conversationId: string | null;
-  initialMessagesLength: number;
-  omittedCount: number;
-}> = [];
+  initialMessages: unknown[];
+  omittedCount?: number;
+  onConversationMinted?: (id: string) => void;
+  providerCatalog?: CatalogLike;
+  catalogLoading?: boolean;
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
+  pinFallbackNotice?: { provider: string; model: string };
+};
+let latestStreamProps: StreamProps | undefined;
+const propsLog: StreamProps[] = [];
 jest.mock('@/components/chat/MessageStream', () => {
   const ReactLocal = jest.requireActual('react') as typeof import('react');
   return {
     __esModule: true,
-    MessageStream: (props: {
-      conversationId: string | null;
-      initialMessages: unknown[];
-      omittedCount?: number;
-      onConversationMinted?: (id: string) => void;
-    }) => {
+    MessageStream: (props: StreamProps) => {
       const idRef = ReactLocal.useRef<number | null>(null);
       if (idRef.current === null) {
         mountCount += 1;
         idRef.current = mountCount;
       }
       latestOnMinted = props.onConversationMinted;
-      propsLog.push({
-        conversationId: props.conversationId,
-        initialMessagesLength: props.initialMessages.length,
-        omittedCount: props.omittedCount ?? 0,
-      });
+      latestStreamProps = props;
+      propsLog.push(props);
       return ReactLocal.createElement(
         'div',
         {
@@ -101,6 +130,8 @@ jest.mock('@/components/chat/MessageStream', () => {
           'data-instance-id': String(idRef.current),
           'data-conv-id': props.conversationId ?? 'null',
           'data-initial-len': String(props.initialMessages.length),
+          'data-catalog-loading': props.catalogLoading ? 'true' : 'false',
+          'data-catalog-len': String(props.providerCatalog?.providers.length ?? 0),
         },
         'mock-message-stream',
       );
@@ -112,17 +143,24 @@ beforeEach(() => {
   currentPathname = '/chat';
   mountCount = 0;
   latestOnMinted = undefined;
+  latestStreamProps = undefined;
   propsLog.length = 0;
   authFetchMock.mockReset();
+  // Default the catalog fetch to a resolved empty catalog so existing tests
+  // that don't exercise the picker just work. Cases that care override it.
+  fetchProviderCatalogMock.mockReset();
+  fetchProviderCatalogMock.mockResolvedValue({ providers: [] });
   _resetConversationHistoryCacheForTests();
 });
 
 describe('ChatSurface — pathname-derived conversationId', () => {
-  it('derives null on /chat (new-conversation surface)', () => {
+  it('derives null on /chat (new-conversation surface)', async () => {
     setPathname('/chat');
     render(<ChatSurface />);
     const ms = screen.getByTestId('message-stream');
     expect(ms.getAttribute('data-conv-id')).toBe('null');
+    // Flush the catalog fetch so its state update is wrapped in act().
+    await flush();
   });
 
   it('derives the UUID on /chat/<uuid>', async () => {
@@ -132,9 +170,7 @@ describe('ChatSurface — pathname-derived conversationId', () => {
     // First render is the loading state until the history fetch settles.
     expect(screen.getByTestId('chat-surface-loading')).toBeInTheDocument();
     // Flush microtasks so the fetch resolves and MessageStream mounts.
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await flush();
     const ms = screen.getByTestId('message-stream');
     expect(ms.getAttribute('data-conv-id')).toBe(CONV_ID);
   });
@@ -171,9 +207,7 @@ describe('ChatSurface — pathname change does not remount MessageStream', () =>
     setPathname(`/chat/${CONV_ID}`);
     rerender(<ChatSurface />);
 
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await flush();
 
     const after = screen.getByTestId('message-stream');
     const instanceAfter = after.getAttribute('data-instance-id');
@@ -195,9 +229,7 @@ describe('ChatSurface — pathname change does not remount MessageStream', () =>
     setPathname(`/chat/${CONV_ID}`);
     stubHistory([], 0);
     const { rerender } = render(<ChatSurface />);
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await flush();
     const firstId = screen
       .getByTestId('message-stream')
       .getAttribute('data-instance-id');
@@ -205,9 +237,7 @@ describe('ChatSurface — pathname change does not remount MessageStream', () =>
     setPathname(`/chat/${OTHER_CONV_ID}`);
     stubHistory([], 0);
     rerender(<ChatSurface />);
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await flush();
     const secondId = screen
       .getByTestId('message-stream')
       .getAttribute('data-instance-id');
@@ -240,9 +270,7 @@ describe('ChatSurface — direct URL hit (refresh / paste-link)', () => {
     );
     render(<ChatSurface />);
     expect(screen.getByTestId('chat-surface-loading')).toBeInTheDocument();
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await flush();
     const ms = screen.getByTestId('message-stream');
     expect(ms.getAttribute('data-initial-len')).toBe('2');
   });
@@ -251,9 +279,87 @@ describe('ChatSurface — direct URL hit (refresh / paste-link)', () => {
     setPathname(`/chat/${CONV_ID}`);
     authFetchMock.mockRejectedValueOnce(new Error('boom'));
     render(<ChatSurface />);
+    await flush();
+    expect(screen.getByTestId('chat-surface-error')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STEP 3 + Codex finding #6 — ChatSurface threads catalog loading/ready/error
+// states (and pin / fallback notice) down to MessageStream.
+// ---------------------------------------------------------------------------
+describe('ChatSurface — catalog loading/ready/error threading', () => {
+  it('passes catalogLoading=true on first render, then false + the ready catalog', async () => {
+    setPathname('/chat');
+    // Hold the catalog fetch open so we can observe the loading prop.
+    let resolveCatalog: (c: { providers: unknown[] }) => void = () => undefined;
+    fetchProviderCatalogMock.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveCatalog = res;
+      }),
+    );
+    render(<ChatSurface />);
+    // Before the fetch resolves the picker is in its loading state.
+    expect(
+      screen.getByTestId('message-stream').getAttribute('data-catalog-loading'),
+    ).toBe('true');
+
     await act(async () => {
+      resolveCatalog({
+        providers: [
+          {
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+            promptPerMillion: 0.15,
+            completionPerMillion: 0.6,
+            contextWindow: 128000,
+          },
+        ],
+      });
+      await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByTestId('chat-surface-error')).toBeInTheDocument();
+
+    const ms = screen.getByTestId('message-stream');
+    expect(ms.getAttribute('data-catalog-loading')).toBe('false');
+    expect(ms.getAttribute('data-catalog-len')).toBe('1');
+  });
+
+  it('renders the catalog-unavailable notice and passes an empty (non-loading) catalog on fetch error', async () => {
+    setPathname('/chat');
+    fetchProviderCatalogMock.mockReset();
+    fetchProviderCatalogMock.mockRejectedValueOnce(new Error('catalog down'));
+    render(<ChatSurface />);
+    await flush();
+    expect(screen.getByTestId('catalog-unavailable-notice')).toBeInTheDocument();
+    const ms = screen.getByTestId('message-stream');
+    expect(ms.getAttribute('data-catalog-loading')).toBe('false');
+    expect(ms.getAttribute('data-catalog-len')).toBe('0');
+  });
+
+  it('threads the current pin and pinFallbackNotice from history into MessageStream', async () => {
+    setPathname(`/chat/${CONV_ID}`);
+    authFetchMock.mockResolvedValueOnce({
+      messages: [],
+      omittedCount: 0,
+      conversation: {
+        id: CONV_ID,
+        title: 't',
+        createdAt: '2026-01-01T00:00:00Z',
+        lastMessageAt: null,
+        pinnedProvider: 'anthropic',
+        pinnedModel: 'claude-3-5-sonnet',
+      },
+      pinFallback: true,
+      previouslyPinned: { provider: 'openai', model: 'gpt-4o-mini' },
+    });
+    render(<ChatSurface />);
+    await flush();
+    expect(latestStreamProps?.pinnedProvider).toBe('anthropic');
+    expect(latestStreamProps?.pinnedModel).toBe('claude-3-5-sonnet');
+    expect(latestStreamProps?.pinFallbackNotice).toEqual({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+    });
   });
 });
