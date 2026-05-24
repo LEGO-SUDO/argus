@@ -14,6 +14,64 @@ function renderAssistant(content: string) {
   return render(<MessageContent role="assistant" content={content} />);
 }
 
+describe('MessageContent — markdown-body styling hook (design review FIX 1)', () => {
+  // The assistant render path wraps its output in `.markdown-body`, which is
+  // the CSS hook `app/globals.css` styles (headings/lists/tables/code, mobile
+  // overflow). The previous design-review blocker was that this class existed
+  // in the DOM but had ZERO matching CSS, so Tailwind's preflight stripped all
+  // semantic typography.
+  //
+  // LIMITATION: jsdom does NOT load `globals.css` and cannot compute styles
+  // from a stylesheet, so this suite asserts the STRUCTURE the CSS targets
+  // (the wrapper class is present and the semantic elements are emitted) — a
+  // structural/snapshot assertion is the ceiling in jsdom. The actual rendered
+  // appearance is verified by the deferred Playwright screenshot baseline in
+  // `tests/e2e/specs/markdown-rendering.spec.ts` (needs a live stack).
+  it('wraps rendered markdown in the .markdown-body class CSS keys off', () => {
+    const { getByTestId } = renderAssistant('# Title\n\ntext');
+    const body = getByTestId('message-content-markdown');
+    expect(body).toHaveClass('markdown-body');
+  });
+
+  it('emits the semantic elements the .markdown-body rules target', () => {
+    const md = [
+      '# H1',
+      '## H2',
+      '### H3',
+      '',
+      'a paragraph with a [link](https://example.com).',
+      '',
+      '- list item',
+      '',
+      '> a quote',
+      '',
+      'inline `code` and:',
+      '',
+      '```ts',
+      'const x = 1;',
+      '```',
+      '',
+      '| a | b |',
+      '| - | - |',
+      '| 1 | 2 |',
+    ].join('\n');
+    const { container } = renderAssistant(md);
+    // Every element the CSS block restyles must be present so the rules can
+    // bind. (We cannot assert computed styles in jsdom — see suite note.)
+    expect(container.querySelector('.markdown-body h1')).not.toBeNull();
+    expect(container.querySelector('.markdown-body h2')).not.toBeNull();
+    expect(container.querySelector('.markdown-body h3')).not.toBeNull();
+    expect(container.querySelector('.markdown-body p')).not.toBeNull();
+    expect(container.querySelector('.markdown-body ul li')).not.toBeNull();
+    expect(container.querySelector('.markdown-body blockquote')).not.toBeNull();
+    expect(container.querySelector('.markdown-body a')).not.toBeNull();
+    expect(container.querySelector('.markdown-body p code')).not.toBeNull();
+    expect(container.querySelector('.markdown-body pre code')).not.toBeNull();
+    expect(container.querySelector('.markdown-body table th')).not.toBeNull();
+    expect(container.querySelector('.markdown-body table td')).not.toBeNull();
+  });
+});
+
 describe('MessageContent — assistant Markdown constructs', () => {
   // Task 68-69 — one assertion per PRD construct.
   it('renders a heading as a heading element', () => {

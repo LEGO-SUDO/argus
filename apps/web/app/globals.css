@@ -213,3 +213,222 @@ kbd {
   background: transparent;
   line-height: 1;
 }
+
+/* ============================================================================
+   Markdown body — assistant message prose rendered by `MessageContent`
+   (react-markdown + remark-gfm). Tailwind's `@tailwind base` preflight resets
+   all heading sizes/weights, list markers, and block margins to nothing, and
+   there is no `@tailwindcss/typography` plugin, so without this block every
+   heading/list/table/code block renders as flat undifferentiated body text.
+
+   These rules restore semantic typography using the chat-* design tokens so
+   the prose reads correctly on both the chat (light) surface and — once it
+   lands — the console (dark) surface, since the tokens flip together under
+   `.surface-console`. Used by BOTH the terminal render path (MessageList) and
+   the live streaming path (MessageStream); both mount `MessageContent`.
+   ============================================================================ */
+
+.markdown-body {
+  /* The wrapper itself inherits the 15px/1.62 body rhythm set by the bubble.
+     Collapse the leading/trailing block margins so the prose aligns with the
+     bubble's own top/bottom padding rather than double-spacing. */
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* Paragraph rhythm. */
+.markdown-body p {
+  margin: 0 0 0.85em;
+}
+
+/* Headings — restore distinct size + weight + margin. */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--chat-ink);
+  margin: 1.4em 0 0.6em;
+}
+
+.markdown-body h1 {
+  font-size: 1.5em;
+  letter-spacing: -0.01em;
+}
+
+.markdown-body h2 {
+  font-size: 1.25em;
+  letter-spacing: -0.005em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--chat-rule);
+}
+
+.markdown-body h3 {
+  font-size: 1.1em;
+}
+
+.markdown-body h4 {
+  font-size: 1em;
+}
+
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: 0.9em;
+  color: var(--chat-ink-2);
+}
+
+/* Lists — restore markers + left padding (preflight zeroes both). */
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 0.85em;
+  padding-left: 1.5em;
+}
+
+.markdown-body ul {
+  list-style: disc;
+}
+
+.markdown-body ol {
+  list-style: decimal;
+}
+
+.markdown-body li {
+  margin: 0.2em 0;
+}
+
+.markdown-body li > ul,
+.markdown-body li > ol {
+  margin: 0.2em 0;
+}
+
+/* GFM task lists — the checkbox + its label read sensibly. remark-gfm emits a
+   plain `<li>` containing an `<input type=checkbox disabled>`. Strip the disc
+   marker on those items and align the box with the text. */
+.markdown-body li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.2em;
+}
+
+.markdown-body input[type="checkbox"] {
+  margin-right: 0.5em;
+  vertical-align: middle;
+  accent-color: var(--acc);
+}
+
+/* Links — accent token; pairs with the external-link target/rel set by
+   MessageContent's custom `a` renderer. */
+.markdown-body a {
+  color: var(--acc);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  /* Long URLs must not force horizontal scroll. */
+  overflow-wrap: anywhere;
+}
+
+.markdown-body a:hover {
+  color: var(--acc-strong);
+}
+
+/* Emphasis. */
+.markdown-body strong {
+  font-weight: 600;
+  color: var(--chat-ink);
+}
+
+.markdown-body em {
+  font-style: italic;
+}
+
+/* Inline code. */
+.markdown-body code {
+  font-family: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo,
+    monospace;
+  font-size: 0.88em;
+  background: var(--chat-rule-2);
+  padding: 0.12em 0.36em;
+  border-radius: var(--r-sm);
+  /* Long unbroken inline code (e.g. a hash) must wrap, not scroll. */
+  overflow-wrap: anywhere;
+}
+
+/* Block code — the fenced-code container scrolls horizontally rather than
+   pushing the conversation column wider on mobile. */
+.markdown-body pre {
+  margin: 0 0 0.85em;
+  padding: 0.85em 1em;
+  background: var(--chat-panel);
+  border: 1px solid var(--chat-rule);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.markdown-body pre > code {
+  /* Reset the inline-code chrome inside a block — the <pre> carries it. */
+  display: block;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.85em;
+  line-height: 1.55;
+  /* Block code keeps its own line breaks; do not force-wrap tokens. */
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
+/* Tables — wrap so they scroll horizontally instead of widening the page. */
+.markdown-body table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 0.85em;
+  font-size: 0.95em;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--chat-rule);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+
+.markdown-body th {
+  font-weight: 600;
+  background: var(--chat-rule-2);
+}
+
+/* Blockquote — left border + muted text. */
+.markdown-body blockquote {
+  margin: 0 0 0.85em;
+  padding: 0.1em 0 0.1em 1em;
+  border-left: 3px solid var(--chat-rule);
+  color: var(--chat-ink-2);
+}
+
+.markdown-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Horizontal rule. */
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--chat-rule);
+  margin: 1.2em 0;
+}
+
+/* Images never overflow the column. */
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+}
