@@ -287,6 +287,13 @@ export function MessageStream({
   // are undefined and the literally-last row may be one of them. Scanning
   // backwards yields the newest completed turn. Returns null when there is
   // no completed assistant message yet (the meter then renders nothing).
+  //
+  // Codex finding #7 (stale-after-failed-turn) — INTENDED, not a bug. PRD
+  // (§"Token-count exactness" + "only fully-completed turns enter history")
+  // and HLD D5 specify the meter reflects the latest *completed* turn; failed
+  // and canceled turns do not count and must NOT clear or alter the meter.
+  // So after `complete → failed`, the meter correctly continues to show the
+  // last completed turn's usage rather than blanking. No change required.
   const lastCompletedAssistant = useMemo(() => {
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const m = state.messages[i];

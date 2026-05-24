@@ -328,6 +328,131 @@ describe('MessageStream — provider/model label', () => {
   });
 });
 
+describe('MessageStream — streaming chip provisional state', () => {
+  it('shows the provider-pending ellipsis before metadata, then provider/model after', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    // start frame → provisional streaming bubble, no provider yet.
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    expect(
+      screen.getByTestId('message-meta-provider-pending'),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('message-stream-provider')).toBeNull();
+
+    // metadata frame → provider/model populate; the ellipsis is replaced.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4o-mini' },
+    });
+    expect(screen.queryByTestId('message-meta-provider-pending')).toBeNull();
+    expect(screen.getByTestId('message-stream-provider')).toHaveTextContent(
+      'openai',
+    );
+    expect(screen.getByTestId('message-stream-model')).toHaveTextContent(
+      'gpt-4o-mini',
+    );
+  });
+
+  it('renders the streaming region before any token, then the markdown body after', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    expect(screen.getByTestId('message-stream-streaming')).toBeInTheDocument();
+    expect(screen.queryByTestId('message-content-markdown')).toBeNull();
+    stub.fire({ type: 'token', messageId: MSG_ID, seq: 2, content: 'hi' });
+    expect(screen.getByTestId('message-content-markdown')).toBeInTheDocument();
+  });
+});
+
+describe('MessageStream — threads picker props to MessageComposer', () => {
+  const CATALOG = {
+    providers: [
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0.15,
+        completionPerMillion: 0.6,
+        contextWindow: 128000,
+      },
+    ],
+  };
+
+  it('renders the ProviderPicker (not legacy pills) when a catalog is threaded', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={CATALOG}
+      />,
+    );
+    expect(screen.getByTestId('provider-picker-trigger')).toBeInTheDocument();
+    expect(screen.queryByTestId('message-composer-provider-pill')).toBeNull();
+  });
+
+  it('shows the threaded pin on the picker and renders the fallback notice', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={CATALOG}
+        pinnedProvider="openai"
+        pinnedModel="gpt-4o-mini"
+        pinFallbackNotice={{ provider: 'anthropic', model: 'claude-3-5-sonnet' }}
+      />,
+    );
+    expect(screen.getByTestId('provider-picker-trigger')).toHaveAccessibleName(
+      /gpt-4o-mini/i,
+    );
+    const notice = screen.getByTestId('pin-fallback-notice');
+    expect(notice).toHaveTextContent(/anthropic/);
+    expect(notice).toHaveTextContent(/claude-3-5-sonnet/);
+  });
+
+  it('puts the picker in its loading state when catalogLoading is true', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={{ providers: [] }}
+        catalogLoading
+      />,
+    );
+    const trigger = screen.getByTestId('provider-picker-trigger');
+    expect(trigger).toHaveTextContent('Loading models…');
+    expect(trigger).not.toHaveTextContent(/No providers configured/i);
+  });
+});
+
 describe('MessageStream — ContextMeter (LLD Tasks 96-97)', () => {
   it('sources tokens from the last COMPLETED assistant message, ignoring failed/canceled rows', () => {
     const stub = makeStubClient();

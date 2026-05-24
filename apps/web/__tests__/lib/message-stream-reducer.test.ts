@@ -512,6 +512,71 @@ describe('message-stream-reducer', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Full-stream integration (STEP 3): start → metadata → token → token → end.
+  // Content concatenates in seq order, provider/model survive into the
+  // promoted message, tokens land only on the complete terminal.
+  // -------------------------------------------------------------------------
+  describe('full stream: start → metadata → token → token → end(complete)', () => {
+    it('concatenates content in order, preserves provider/model, copies tokens', () => {
+      let state = reducer(initialState, { type: 'frame', frame: makeStart() });
+      // Provisional bubble: no provider/model yet, empty content.
+      expect(state.streaming?.provider).toBeUndefined();
+      expect(state.streaming?.model).toBeUndefined();
+      expect(state.streaming?.content).toBe('');
+
+      state = reducer(state, {
+        type: 'frame',
+        frame: makeMetadata('openai', 'gpt-4o-mini'),
+      });
+      expect(state.streaming?.provider).toBe('openai');
+      expect(state.streaming?.model).toBe('gpt-4o-mini');
+
+      state = reducer(state, { type: 'frame', frame: makeToken(2, 'Hello') });
+      state = reducer(state, { type: 'frame', frame: makeToken(3, ', world') });
+      expect(state.streaming?.content).toBe('Hello, world');
+
+      state = reducer(state, {
+        type: 'frame',
+        frame: makeEnd('complete', MSG_ID, {
+          tokensUsed: 4096,
+          tokensBudget: 8192,
+        }),
+      });
+      // Promoted: provider/model survive, content intact, tokens present.
+      expect(state.streaming).toBeNull();
+      const promoted = state.messages[state.messages.length - 1];
+      expect(promoted?.status).toBe('complete');
+      expect(promoted?.content).toBe('Hello, world');
+      expect(promoted?.provider).toBe('openai');
+      expect(promoted?.model).toBe('gpt-4o-mini');
+      expect(promoted?.tokensUsed).toBe(4096);
+      expect(promoted?.tokensBudget).toBe(8192);
+      expect(state.composerDisabled).toBe(false);
+    });
+
+    it('drops tokens (but keeps provider/model + partial content) on a failed terminal end', () => {
+      let state = reducer(initialState, { type: 'frame', frame: makeStart() });
+      state = reducer(state, {
+        type: 'frame',
+        frame: makeMetadata('anthropic', 'claude-3-5-sonnet'),
+      });
+      state = reducer(state, { type: 'frame', frame: makeToken(2, 'partial') });
+      state = reducer(state, {
+        type: 'frame',
+        frame: makeEnd('failed', MSG_ID, { tokensUsed: 9, tokensBudget: 9 }),
+      });
+      const promoted = state.messages[state.messages.length - 1];
+      expect(promoted?.status).toBe('failed');
+      expect(promoted?.content).toBe('partial');
+      expect(promoted?.provider).toBe('anthropic');
+      expect(promoted?.model).toBe('claude-3-5-sonnet');
+      // Tokens are dropped — a non-complete turn produced no usage report.
+      expect(promoted?.tokensUsed).toBeUndefined();
+      expect(promoted?.tokensBudget).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Task 57: error frame without active stream + no_providers_available
   // -------------------------------------------------------------------------
   describe('terminal error before start', () => {
