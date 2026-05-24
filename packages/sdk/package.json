@@ -11,7 +11,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "lint": "eslint \"src/**/*.ts\"",
@@ -20,9 +22,13 @@
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {
-    "@argus/contracts": "workspace:*"
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@argus/contracts": "workspace:*",
+    "@opentelemetry/api": "^1.9.1",
+    "openai": "^6.39.0"
   },
   "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@types/jest": "^29.5.14",
     "@types/node": "^20.17.6",
     "eslint": "^8.57.1",
