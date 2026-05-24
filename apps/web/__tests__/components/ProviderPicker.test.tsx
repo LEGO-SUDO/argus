@@ -209,16 +209,29 @@ describe('ProviderPicker — streaming gate', () => {
 });
 
 describe('ProviderPicker — empty state', () => {
-  // Task 117-118
-  it('renders the locked env-var copy and does not open when no providers are configured', async () => {
+  const FULL_GUIDANCE =
+    'No providers configured — set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in .env.';
+
+  // Task 117-118 + design review FIX 5: the VISIBLE pill label is short ("No
+  // providers") so the truncating max-w-[280px] trigger doesn't clip the full
+  // sentence mid-word; the full env-var guidance lives in the accessible name
+  // (aria-label) and the hover title instead.
+  it('shows a short visible label and does not open when no providers are configured', async () => {
     renderPicker({ catalog: EMPTY_CATALOG });
     const trigger = screen.getByRole('combobox');
-    expect(trigger).toHaveTextContent(
-      'No providers configured — set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in .env.',
-    );
+    // Short visible label — the full sentence is NOT in the visible text.
+    expect(trigger).toHaveTextContent('No providers');
+    expect(trigger).not.toHaveTextContent(/set OPENAI_API_KEY/);
     expect(trigger).toHaveAttribute('aria-disabled', 'true');
     await userEvent.click(trigger);
     expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('carries the full env-var guidance in the accessible name and title', () => {
+    renderPicker({ catalog: EMPTY_CATALOG });
+    const trigger = screen.getByRole('combobox');
+    expect(trigger).toHaveAccessibleName(FULL_GUIDANCE);
+    expect(trigger).toHaveAttribute('title', FULL_GUIDANCE);
   });
 });
 
@@ -292,23 +305,41 @@ describe('ProviderPicker — unique listbox ids (useId)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Codex finding #5 — combobox a11y. When open, aria-activedescendant points
-// at the active option (which carries a matching id), per the WAI-ARIA
-// combobox pattern.
+// Design review FIX 3 — combobox a11y conflict. The picker uses the
+// ROVING-FOCUS model: DOM focus moves into the option rows and the active
+// option carries tabindex=0 (the rest -1). It must NOT ALSO set
+// aria-activedescendant — that would mix two mutually-exclusive ARIA patterns.
+// This replaces the prior aria-activedescendant suite (Codex finding #5),
+// which set up the conflicting half of the pattern.
 // ---------------------------------------------------------------------------
-describe('ProviderPicker — aria-activedescendant', () => {
-  it('points aria-activedescendant at the focused option id when open', async () => {
+describe('ProviderPicker — roving focus (no aria-activedescendant)', () => {
+  it('moves real DOM focus to the active option and never sets aria-activedescendant', async () => {
     renderPicker();
     const trigger = screen.getByRole('combobox');
     trigger.focus();
     await userEvent.keyboard('{ArrowDown}'); // open, focus option 0
-    const activeId = trigger.getAttribute('aria-activedescendant');
-    expect(activeId).toBeTruthy();
     const options = screen.getAllByRole('option');
-    expect(options[0]!.id).toBe(activeId);
-    // Move down — activedescendant tracks the new active option.
+    // Roving focus: the active option IS the focused element.
+    expect(options[0]).toHaveFocus();
+    // ...and aria-activedescendant must be absent (the conflicting pattern).
+    expect(trigger).not.toHaveAttribute('aria-activedescendant');
+    // Move down — focus rolls to the next option; still no activedescendant.
     await userEvent.keyboard('{ArrowDown}');
-    expect(trigger.getAttribute('aria-activedescendant')).toBe(options[1]!.id);
+    expect(options[1]).toHaveFocus();
+    expect(trigger).not.toHaveAttribute('aria-activedescendant');
+  });
+
+  it('applies a roving tabindex: only the active option is tabbable', async () => {
+    renderPicker();
+    screen.getByRole('combobox').focus();
+    await userEvent.keyboard('{ArrowDown}'); // open, focus option 0
+    const options = screen.getAllByRole('option');
+    expect(options[0]).toHaveAttribute('tabindex', '0');
+    expect(options[1]).toHaveAttribute('tabindex', '-1');
+    // Roll focus down — tabindex follows the active option.
+    await userEvent.keyboard('{ArrowDown}');
+    expect(options[0]).toHaveAttribute('tabindex', '-1');
+    expect(options[1]).toHaveAttribute('tabindex', '0');
   });
 
   it('has no aria-activedescendant while closed', () => {

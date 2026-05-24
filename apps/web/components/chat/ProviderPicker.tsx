@@ -1,10 +1,21 @@
 // ProviderPicker — model selector following the WAI-ARIA 1.2 combobox-with-
 // listbox pattern (LLD Block G, Tasks 99-118).
 //
+// Focus model: ROVING FOCUS (design review FIX 3). Real DOM focus moves into
+// the option rows while the listbox is open; the active option carries
+// `tabindex=0` and every other option `tabindex=-1`. We deliberately do NOT
+// also set `aria-activedescendant` on the trigger — activedescendant and
+// roving-focus are mutually-exclusive ARIA patterns (activedescendant keeps
+// DOM focus on the combobox and only POINTS at the active option; roving
+// focus actually MOVES focus). Mixing them double-announces and confuses AT.
+// We chose roving focus because the keyboard handler + selection already live
+// where focus lands (the `<ul>` and its `<li>`s), so it is the smaller, more
+// robust delta.
+//
 // Trigger: a <button role="combobox"> whose aria-expanded reflects open
 // state. Dropdown panel: role="listbox". Each model row: role="option".
 //
-// Keyboard:
+// Keyboard (handler lives on the listbox, where focus is):
 //   - ArrowDown on the focused trigger opens the dropdown and focuses the
 //     first option.
 //   - ArrowUp/ArrowDown on an option move focus to the previous/next option,
@@ -19,8 +30,10 @@
 //     catalog; a stale pin (pair absent) falls back to "Auto". When pinned,
 //     the dropdown includes a leading "Auto" option that calls onClear.
 //   - Streaming: trigger aria-disabled, does not open.
-//   - Empty catalog: trigger shows the locked env-var copy, aria-disabled,
-//     does not open.
+//   - Empty catalog: trigger shows a SHORT "No providers" label (the full
+//     env-var guidance lives in the accessible name + title so the truncating
+//     pill doesn't clip it — design review FIX 5), aria-disabled, does not
+//     open.
 //
 // We implement the pattern inline with semantic elements + the documented
 // handlers (no generic listbox primitive exists in this repo yet).
@@ -38,7 +51,13 @@ import {
 
 import type { ProviderCatalog, ProviderCatalogEntry } from '@/lib/providers-api';
 
-const EMPTY_STATE_LABEL =
+// Empty-state copy (design review FIX 5). The full env-var guidance is too
+// long for the truncating `max-w-[280px]` pill — it gets clipped mid-word and
+// read verbatim by screen readers. So the VISIBLE label is short ("No
+// providers") and the full sentence lives in the trigger's `title` (hover
+// tooltip) + `aria-label` (the accessible name AT announces).
+const EMPTY_STATE_VISIBLE_LABEL = 'No providers';
+const EMPTY_STATE_FULL_GUIDANCE =
   'No providers configured — set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in .env.';
 
 const LOADING_LABEL = 'Loading models…';
@@ -112,17 +131,26 @@ export function ProviderPicker({
     );
   }, [catalog.providers, pinnedProvider, pinnedModel]);
 
-  // Trigger label. Loading copy wins first (a fetch is in flight, so we don't
-  // yet know whether the catalog is empty); then the env-var empty-state copy
-  // (only meaningful AFTER the fetch resolved with zero providers); then a
+  // Visible trigger label. Loading copy wins first (a fetch is in flight, so
+  // we don't yet know whether the catalog is empty); then the SHORT empty-state
+  // label (the full guidance moves to the title/aria-label — FIX 5); then a
   // valid pin; else Auto. (Codex finding #6 — no empty-state flash mid-fetch.)
   const triggerLabel = loading
     ? LOADING_LABEL
     : isEmpty
-      ? EMPTY_STATE_LABEL
+      ? EMPTY_STATE_VISIBLE_LABEL
       : pinIsValid
         ? `${pinnedProvider} · ${pinnedModel}`
         : 'Auto';
+
+  // Accessible name + hover tooltip. For the empty state these carry the FULL
+  // env-var guidance so screen readers and a hover read the actionable remedy
+  // even though the visible pill stays short (FIX 5). Otherwise they mirror the
+  // visible label.
+  const triggerAccessibleLabel = isEmpty
+    ? EMPTY_STATE_FULL_GUIDANCE
+    : triggerLabel;
+  const triggerTitle = isEmpty ? EMPTY_STATE_FULL_GUIDANCE : undefined;
 
   // Grouped catalog for rendering (provider → its model rows). Stable order
   // follows first-appearance in the catalog array.
@@ -239,16 +267,20 @@ export function ProviderPicker({
         // We mirror it onto aria-disabled for AT that read the ARIA layer.
         disabled={isDisabled}
         aria-disabled={isDisabled || undefined}
-        // WAI-ARIA combobox: when the listbox is open, point at the active
-        // option so AT announces the focused row without moving DOM focus off
-        // the combobox conceptually (Codex finding #5).
-        aria-activedescendant={
-          open && !isDisabled ? optionId(activeIndex) : undefined
-        }
+        // NOTE: no `aria-activedescendant` here. This picker uses the
+        // roving-focus model — when the listbox opens, DOM focus moves into
+        // the option rows (see the focus effect below), so the active option
+        // is the document's focused element. Setting activedescendant too
+        // would mix two mutually-exclusive ARIA patterns (design review FIX 3).
         // Explicit accessible name so screen readers (and the accessible-name
         // computation) get a stable label regardless of the nested span/SVG
-        // structure. Mirrors the visible label.
-        aria-label={triggerLabel}
+        // structure. Mirrors the visible label EXCEPT in the empty state,
+        // where it carries the full env-var guidance the short pill omits
+        // (FIX 5).
+        aria-label={triggerAccessibleLabel}
+        // Hover tooltip — surfaces the full guidance for sighted mouse users
+        // in the empty state (undefined otherwise so no redundant tooltip).
+        title={triggerTitle}
         aria-busy={busy || loading || undefined}
         data-testid="provider-picker-trigger"
         data-loading={loading ? 'true' : undefined}
@@ -304,7 +336,9 @@ export function ProviderPicker({
                     }}
                     role="option"
                     aria-selected={false}
-                    tabIndex={-1}
+                    // Roving tabindex: only the active option is tabbable;
+                    // the rest are -1 so Tab doesn't walk every row.
+                    tabIndex={idx === activeIndex ? 0 : -1}
                     data-testid="provider-picker-option-auto"
                     onClick={() => selectOption({ kind: 'auto' })}
                     className="cursor-pointer px-3 py-1.5 text-[12.5px] text-chat-ink outline-none hover:bg-chat-hover focus:bg-chat-hover"
@@ -340,7 +374,8 @@ export function ProviderPicker({
                       }}
                       role="option"
                       aria-selected={selected}
-                      tabIndex={-1}
+                      // Roving tabindex — see the Auto option above.
+                      tabIndex={idx === activeIndex ? 0 : -1}
                       data-testid={`provider-picker-option-${entry.provider}-${entry.model}`}
                       onClick={() => selectOption({ kind: 'model', entry })}
                       className="flex cursor-pointer flex-col gap-0.5 px-3 py-1.5 outline-none hover:bg-chat-hover focus:bg-chat-hover"
