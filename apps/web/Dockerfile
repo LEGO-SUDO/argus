@@ -40,6 +40,13 @@ COPY packages/contracts packages/contracts
 RUN pnpm --filter @argus/contracts build
 # Next standalone build.
 ENV NEXT_TELEMETRY_DISABLED=1
+# next.config.mjs `rewrites()` is evaluated at BUILD time for standalone
+# output and the resolved URLs get baked into .next/routes-manifest.json
+# — so we MUST set INTERNAL_API_URL here in the builder env, not just at
+# runtime in compose. Default to the compose service name; can be
+# overridden via --build-arg for other deployment targets.
+ARG INTERNAL_API_URL=http://api:4000
+ENV INTERNAL_API_URL=${INTERNAL_API_URL}
 RUN pnpm --filter @argus/web build
 
 # -----------------------------------------------------------------------------
