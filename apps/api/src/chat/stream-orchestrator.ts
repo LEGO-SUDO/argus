@@ -1,18 +1,24 @@
 // StreamOrchestrator — the only call site for packages/sdk's chat.stream.
 //
-// Lifecycle:
-//   runStream({ messageId, sdkStream, emit, conversationId, provider, model })
-//     1. emit(start)
-//     2. for each token in sdkStream — emit(token), accumulate content
-//     3. on done — completeTurn(content), emit(end status='complete'), release
-//     4. on cancel() — abort sdk iterator, cancelTurn(partial),
-//                       emit(cancel-ack), emit(end status='canceled'), release
-//     5. on onDisconnect() — abort, failTurn(partial, 'client_disconnected'),
+// Lifecycle (chat-context-and-ux-polish backbone, LLD Tasks 40-47 / 56-59):
+//   runStream({ messageId, sdkStream, emit, conversationId, userId?, meter? })
+//     1. emit(start) — identity-only at seq=0 (LLD Task 2/41)
+//     2. on SDK `commit` chunk → emit(metadata) EXACTLY ONCE at seq=1
+//        from the commit payload (LLD Preamble §2, Task 41/43).
+//     3. for each token in sdkStream — emit(token), accumulate content
+//     4. on done — completeTurn(content), invoke meter inside try/catch
+//        (LLD Task 57), emit(end status='complete' [+ context fields]), release
+//     5. on cancel() — abort sdk iterator, cancelTurn(partial),
+//                       emit(cancel-ack), emit(end status='canceled'), release.
+//                       Meter intentionally NOT invoked (LLD Task 59).
+//     6. on onDisconnect() — abort, failTurn(partial, 'client_disconnected'),
 //                             do NOT emit further (socket is gone)
-//     6. on SDK throw — failTurn(partial, code), emit(error), emit(end status='failed')
+//     7. on SDK throw — failTurn(partial, code), emit(error),
+//                        emit(end status='failed'). Pre-token error path
+//                        ships NO metadata frame (LLD Preamble §3).
 //
-// Tasks 47..54. The orchestrator owns a single AbortController per
-// invocation; sdkStream.signal is the same controller's signal.
+// The orchestrator owns a single AbortController per invocation;
+// sdkStream.signal is the same controller's signal.
 import type { ChatStreamChunk, ProviderMeta } from '@argus/sdk';
 import { ChatService } from './chat.service';
 import { SeqCounterRegistry } from './seq-counter';
@@ -20,11 +26,13 @@ import {
   buildCancelAckFrame,
   buildEndFrame,
   buildErrorFrame,
+  buildMetadataFrame,
   buildStartFrame,
   buildTokenFrame,
 } from './frame-builder';
 import type { WsFrameOutbound } from '@argus/contracts';
 import { captureApiError } from '../observability/sentry';
+import type { ContextMeterService, ContextMeterReadout } from './context-meter.service';
 
 /** What the orchestrator emits — gateway forwards over WS, tests assert on it. */
 export type Emit = (frame: WsFrameOutbound) => void;
@@ -41,6 +49,11 @@ export interface RunStreamInput {
   /** Surface the underlying AbortController so we can stop the SDK iterator. */
   abort: AbortController;
   emit: Emit;
+  // chat-context-and-ux-polish LLD Task 57 — meter (+ userId for the
+  // meter's authz). Both optional so the orchestrator stays buildable from
+  // callers that don't have a meter wired (tests, future RPC entry points).
+  userId?: string;
+  meter?: ContextMeterService;
 }
 
 type Terminal = 'complete' | 'canceled' | 'failed' | 'disconnected';
@@ -48,6 +61,12 @@ type Terminal = 'complete' | 'canceled' | 'failed' | 'disconnected';
 export class StreamOrchestrator {
   private terminal: Terminal | null = null;
   private partialContent = '';
+  // chat-context-and-ux-polish LLD Task 43 — exactly-once metadata guard.
+  // Even if the SDK defensively yields two `commit` chunks (router has its
+  // own guard, but defense-in-depth here too) the orchestrator must emit
+  // metadata exactly once (Preamble §2).
+  private metadataEmitted = false;
+  private committedProviderMeta: ProviderMeta | null = null;
 
   constructor(
     private readonly chat: ChatService,
@@ -81,7 +100,27 @@ export class StreamOrchestrator {
         // disconnect arrived between iterator yields), drop the chunk before
         // we mutate any state or emit.
         if (this.terminal !== null) return;
-        if (chunk.type === 'token') {
+        if (chunk.type === 'commit') {
+          // LLD Task 41 — emit metadata frame EXACTLY ONCE per turn from the
+          // commit chunk's providerMeta. Subsequent commits coalesce
+          // (Task 43 guard); the seq counter must NOT advance on the dropped
+          // duplicates.
+          if (this.metadataEmitted) continue;
+          this.metadataEmitted = true;
+          this.committedProviderMeta = chunk.providerMeta;
+          const metaSeq = counter.next(); // consume 1
+          if (metaSeq !== 1) {
+            // Defensive — should be guaranteed by the start@0 advance above.
+            // Capture but proceed; the wire-side schema pins seq=1.
+            captureApiError({
+              err: new Error('metadata seq drift'),
+              feature: 'chat',
+              layer: 'orchestrator',
+              extra: { messageId: this.input.messageId, observedSeq: String(metaSeq) },
+            });
+          }
+          this.emit(buildMetadataFrame(this.input.messageId, chunk.providerMeta));
+        } else if (chunk.type === 'token') {
           // Race guard #2: a chunk may have been buffered by the iterator
           // BEFORE cancel/disconnect aborted. Re-check after a microtask hop
           // so a cancel() that fired between the for-await yield and this
@@ -93,11 +132,18 @@ export class StreamOrchestrator {
           this.emit(buildTokenFrame(this.input.messageId, counter.next(), chunk.content));
         } else if (chunk.type === 'done') {
           providerMeta = chunk.providerMeta;
+          // LLD Preamble §2: never re-emit metadata from done. The
+          // providerMeta here exists for the inferences-row enrichment
+          // path (workers projection consumer); we just stash it.
         }
       }
     } catch (err) {
       // SDK threw — could be pre-first-token or mid-stream. Either way,
       // flush partial + emit error + end.
+      // LLD Task 45: this catch-block does NOT call the metadata emitter —
+      // pre-token failures must NEVER produce a metadata frame
+      // (Preamble §3). The orchestrator's only metadata emission lives in
+      // the iterator's `chunk.type === 'commit'` branch above.
       if (this.terminal !== null) return; // disconnect already handled
       const code = errorCodeOf(err);
       this.terminal = 'failed';
@@ -139,8 +185,40 @@ export class StreamOrchestrator {
         },
       });
     }
-    this.emit(buildEndFrame(this.input.messageId, counter.next(), 'complete'));
+    // LLD Tasks 57/59 — meter wiring gated to the `complete` terminal only.
+    // Meter throws are non-fatal: log + emit end without context fields.
+    // Failed and canceled terminals NEVER invoke the meter (Task 59).
+    const meterReadout = await this.computeMeter();
+    this.emit(
+      buildEndFrame(
+        this.input.messageId,
+        counter.next(),
+        'complete',
+        meterReadout ?? undefined,
+      ),
+    );
     this.seqRegistry.release(this.input.messageId);
+  }
+
+  private async computeMeter(): Promise<ContextMeterReadout | null> {
+    if (!this.input.meter || !this.input.userId) return null;
+    try {
+      return await this.input.meter.compute({
+        conversationId: this.input.conversationId,
+        userId: this.input.userId,
+      });
+    } catch (err) {
+      captureApiError({
+        err,
+        feature: 'chat',
+        layer: 'orchestrator',
+        extra: {
+          stage: 'context-meter-compute',
+          messageId: this.input.messageId,
+        },
+      });
+      return null;
+    }
   }
 
   /**
@@ -163,6 +241,7 @@ export class StreamOrchestrator {
     }
     const counter = this.seqRegistry.for(this.input.messageId);
     this.emit(buildCancelAckFrame(this.input.messageId));
+    // LLD Task 59 — canceled terminal: no meter call, no context fields.
     this.emit(buildEndFrame(this.input.messageId, counter.next(), 'canceled'));
     this.seqRegistry.release(this.input.messageId);
   }
@@ -191,6 +270,11 @@ export class StreamOrchestrator {
 
   isTerminal(): boolean {
     return this.terminal !== null;
+  }
+
+  /** Read the committed providerMeta (when emitted). Test/debug surface. */
+  getCommittedProviderMeta(): ProviderMeta | null {
+    return this.committedProviderMeta;
   }
 
   private emit(frame: WsFrameOutbound): void {

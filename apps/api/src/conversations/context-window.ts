@@ -5,13 +5,19 @@
 // field (frontend-web Task 42 "N earlier messages omitted") is correct on
 // first paint.
 //
+// chat-context-and-ux-polish backbone (LLD Tasks 49/51):
+//   - The 4-chars-per-token estimator and the default-budget reader moved
+//     to `apps/api/src/common/token-heuristic.ts`. This module now reads
+//     from there so `ContextMeterService` (chat module) and the
+//     conversations controller share the same primitive without either
+//     module importing the other.
+//   - PRD default bumped 6000 → 10000 (LLD Task 51); fixture tests in
+//     this directory updated accordingly.
+//
 // Heuristic:
-//   - Token estimate: ~4 chars per token (industry rule-of-thumb for
-//     English text + most BPE tokenizers; off by maybe 30% for code-heavy
-//     content but acceptable for a UI indicator).
-//   - Drop oldest-first until the running sum fits in CONTEXT_TOKEN_BUDGET
-//     (env, default 6000 — matches brief.md "last N turns, hard-capped at
-//     ~6k tokens, configurable via env").
+//   - Token estimate: `estimateTokens` from common (~4 chars per token).
+//   - Drop oldest-first until the running sum fits in
+//     `defaultContextBudget()` (env CONTEXT_TOKEN_BUDGET, default 10000).
 //   - Always keep the most-recent message even if it alone exceeds the
 //     budget (otherwise the user's just-sent prompt would be dropped —
 //     non-sensical; the SDK will truncate that case via input handling).
@@ -20,23 +26,7 @@
 // (provider-specific) so the indicator matches what the model actually
 // receives. The shape of this function (rows in, count out) is stable.
 import type { MessageRow } from './messages.repository';
-
-const DEFAULT_TOKEN_BUDGET = 6000;
-const CHARS_PER_TOKEN = 4;
-
-function tokenBudget(): number {
-  const raw = process.env.CONTEXT_TOKEN_BUDGET;
-  if (!raw) return DEFAULT_TOKEN_BUDGET;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_TOKEN_BUDGET;
-  return Math.floor(n);
-}
-
-function estimateTokens(content: string): number {
-  // Ceiling — better to slightly over-count and trim more than under-count
-  // and overflow the model's actual context window downstream.
-  return Math.ceil(content.length / CHARS_PER_TOKEN);
-}
+import { defaultContextBudget, estimateTokens } from '../common/token-heuristic';
 
 /**
  * Return the number of leading (oldest) messages that would be dropped from
@@ -47,7 +37,7 @@ function estimateTokens(content: string): number {
  */
 export function computeOmittedCount(rows: ReadonlyArray<Pick<MessageRow, 'content'>>): number {
   if (rows.length <= 1) return 0;
-  const budget = tokenBudget();
+  const budget = defaultContextBudget();
   // Walk from newest backwards, accumulating tokens. Stop when adding the
   // next-older message would exceed the budget — everything older is
   // "omitted".

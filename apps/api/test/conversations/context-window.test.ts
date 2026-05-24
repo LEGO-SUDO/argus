@@ -56,10 +56,10 @@ describe('computeOmittedCount', () => {
     expect(computeOmittedCount(ms)).toBe(1);
   });
 
-  it('falls back to the default budget when env is unset', () => {
+  it('falls back to the default budget when env is unset (LLD Task 51 bump: 10000)', () => {
     delete process.env.CONTEXT_TOKEN_BUDGET;
-    // Default is 6000 tokens. 30 messages of 100 chars = 25 tokens each →
-    // 750 tokens, well under default → nothing omitted.
+    // Default is now 10000 tokens (PRD bump in chat-context-and-ux-polish).
+    // 30 messages of 100 chars = 25 tokens each → 750 tokens, well under default.
     const ms = Array.from({ length: 30 }, () => 'a'.repeat(100));
     expect(computeOmittedCount(rows(...ms))).toBe(0);
   });
