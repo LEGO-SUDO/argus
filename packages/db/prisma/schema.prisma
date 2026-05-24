@@ -1,0 +1,169 @@
+// Argus Chatbot Phase A — Prisma schema.
+//
+// HLD D4 reference:
+//   - Five core tables: users, sessions, conversations, messages, inferences
+//   - One projection table: trace_events
+//   - Cost columns stored as integer micro-USD (no float drift)
+//   - user_id denormalized on inferences + trace_events (Phase B reads filter
+//     on user_id without JOINs)
+//   - (message_id) is a regular index on inferences, NOT unique — failover
+//     attempts share the same message_id, one row per attempt
+//   - (trace_id, span_id) UNIQUE on trace_events — projection consumer
+//     idempotency guard
+//   - trace_events.payload is Jsonb — Phase B Replay queries fields without
+//     rehydration; capped at 100KB per OTel span event
+//   - (user_id, created_at desc) compound index on inferences + trace_events
+//     to back Phase B per-user feed queries
+//
+// Ownership boundary (load-bearing — see lld-backend-infra §Tasks):
+//   - messages.status is owned by the API gateway, written synchronously.
+//   - inferences placeholder row is inserted by the API gateway with
+//     status=streaming; the projection consumer enriches it in place keyed
+//     on message_id.
+//   - trace_events is written only by the projection consumer.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MessageStatus {
+  streaming
+  complete
+  canceled
+  failed
+}
+
+enum InferenceStatus {
+  streaming
+  ok
+  failed
+  canceled
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  sessions      Session[]
+  conversations Conversation[]
+  messages      Message[]
+  inferences    Inference[]
+  traceEvents   TraceEvent[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Conversation {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  title         String
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastMessageAt DateTime? @map("last_message_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([userId, lastMessageAt(sort: Desc)])
+  @@map("conversations")
+}
+
+model Message {
+  id             String        @id @db.Uuid
+  conversationId String        @map("conversation_id") @db.Uuid
+  userId         String        @map("user_id") @db.Uuid
+  role           String
+  content        String
+  status         MessageStatus
+  createdAt      DateTime      @default(now()) @map("created_at")
+  completedAt    DateTime?     @map("completed_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model Inference {
+  id                      String          @id @default(uuid()) @db.Uuid
+  messageId               String          @map("message_id") @db.Uuid
+  conversationId          String          @map("conversation_id") @db.Uuid
+  userId                  String          @map("user_id") @db.Uuid
+  provider                String
+  model                   String
+  status                  InferenceStatus
+  latencyMs               Int?            @map("latency_ms")
+  promptTokens            Int?            @map("prompt_tokens")
+  completionTokens        Int?            @map("completion_tokens")
+  promptCostUsdMicros     Int?            @map("prompt_cost_usd_micros")
+  completionCostUsdMicros Int?            @map("completion_cost_usd_micros")
+  startedAt               DateTime        @map("started_at")
+  endedAt                 DateTime?       @map("ended_at")
+  inputPreview            String?         @map("input_preview")
+  outputPreview           String?         @map("output_preview")
+  traceId                 String?         @map("trace_id")
+  spanId                  String?         @map("span_id")
+  errorCode               String?         @map("error_code")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Regular index — NOT unique. Failover attempts share message_id, one row each.
+  @@index([messageId])
+  @@index([userId, startedAt(sort: Desc)])
+  // Lookups by (trace_id, span_id) for failover detection + Phase B debugging.
+  // Inference rows can carry these from the SDK before the consumer enriches
+  // them; not unique because the same (trace, span) may legitimately be
+  // referenced by both an enrichment write and a future failover-history row.
+  @@index([traceId, spanId])
+  @@map("inferences")
+}
+
+model TraceEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  traceId   String   @map("trace_id")
+  spanId    String   @map("span_id")
+  messageId String?  @map("message_id") @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  name      String
+  payload   Json     @db.JsonB
+  truncated Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Idempotency guard for projection consumer — duplicate OTel deliveries
+  // are normal under Collector retries. Unique violation = skip verdict.
+  @@unique([traceId, spanId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([messageId])
+  @@map("trace_events")
+}
