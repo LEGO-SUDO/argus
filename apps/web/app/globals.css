@@ -1,0 +1,215 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   Design tokens — single source of truth for both surfaces.
+
+   Mirrors `docs/design/project/styles.css` :root block. Tailwind references
+   these via CSS variables (see `tailwind.config.ts`), so a wrapper such as
+   `.surface-console` can later flip the values without rebuilding classes.
+   Phase A only uses chat-* tokens; con-* is reserved for the Phase B console.
+   ============================================================================ */
+
+:root {
+  /* Brand accent — shared across surfaces. */
+  --acc: oklch(0.6 0.13 30);
+  --acc-soft: oklch(0.6 0.13 30 / 0.1);
+  --acc-strong: oklch(0.52 0.15 30);
+
+  /* Chat (warm light). */
+  --chat-bg: oklch(0.985 0.005 80);
+  --chat-panel: oklch(0.97 0.006 80);
+  --chat-ink: oklch(0.2 0.012 60);
+  --chat-ink-2: oklch(0.4 0.01 60);
+  --chat-ink-3: oklch(0.6 0.01 60);
+  --chat-rule: oklch(0.9 0.008 80);
+  --chat-rule-2: oklch(0.94 0.006 80);
+  --chat-hover: oklch(0.96 0.008 80);
+
+  /* Console (dev-dense dark) — preserved for Phase B. */
+  --con-bg: oklch(0.165 0.008 270);
+  --con-panel: oklch(0.205 0.008 270);
+  --con-panel-2: oklch(0.23 0.008 270);
+  --con-rule: oklch(0.28 0.01 270);
+  --con-rule-2: oklch(0.35 0.01 270);
+  --con-text: oklch(0.94 0.005 270);
+  --con-dim: oklch(0.66 0.008 270);
+  --con-dim-2: oklch(0.48 0.01 270);
+  --con-hover: oklch(0.235 0.008 270);
+
+  /* Status — work on both surfaces. */
+  --ok: oklch(0.72 0.13 145);
+  --warn: oklch(0.78 0.14 80);
+  --err: oklch(0.66 0.18 25);
+  --info: oklch(0.7 0.1 240);
+
+  /* Provider colors — consistent across Traces / Cost / Replay. */
+  --p-openai: oklch(0.72 0.13 165);
+  --p-anthropic: oklch(0.7 0.14 50);
+  --p-gemini: oklch(0.7 0.13 245);
+  --p-mock: oklch(0.66 0.02 270);
+
+  /* Radii. */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+}
+
+/* When the console surface lands (Phase B), wrap its tree in
+   `.surface-console` to flip the body palette without changing any
+   class names. The variables below override only what differs from
+   the chat surface; provider/status/accent stay shared. */
+.surface-console {
+  --chat-bg: var(--con-bg);
+  --chat-panel: var(--con-panel);
+  --chat-ink: var(--con-text);
+  --chat-ink-2: var(--con-dim);
+  --chat-ink-3: var(--con-dim-2);
+  --chat-rule: var(--con-rule);
+  --chat-rule-2: var(--con-rule-2);
+  --chat-hover: var(--con-hover);
+}
+
+/* ============================================================================
+   Base reset — matches `docs/design/project/styles.css` body rules.
+   Kept intentionally small. Component-scoped styles live in their components.
+   ============================================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  background: var(--chat-bg);
+  color: var(--chat-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ============================================================================
+   Typography helpers — referenced throughout the design source so they need
+   to be globally available.
+   ============================================================================ */
+
+.mono {
+  font-family: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo,
+    monospace;
+  font-feature-settings: "ss01";
+}
+
+.serif {
+  font-family: var(--font-instrument-serif), "Iowan Old Style", Georgia, serif;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   Provider chip (shown per assistant turn) — the colored 6×6 swatch keys off
+   the data-prov attribute so it stays in sync with the provider tokens.
+   ============================================================================ */
+
+.prov {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo,
+    monospace;
+  font-size: 10.5px;
+  color: var(--chat-ink-2);
+}
+
+.prov .swatch {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--p-mock);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.prov[data-prov="openai"] .swatch {
+  background: var(--p-openai);
+}
+
+.prov[data-prov="anthropic"] .swatch {
+  background: var(--p-anthropic);
+}
+
+.prov[data-prov="gemini"] .swatch {
+  background: var(--p-gemini);
+}
+
+.prov[data-prov="mock"] .swatch {
+  background: var(--p-mock);
+}
+
+/* ============================================================================
+   Streaming caret — used by assistant message bubbles during live streams.
+   Kept here (vs in a component) because it's defined as a CSS animation.
+   ============================================================================ */
+
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 16px;
+  background: var(--acc);
+  vertical-align: -3px;
+  margin-left: 1px;
+  animation: caret 1.1s steps(2) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ============================================================================
+   `<kbd>` style — used in composer help row and sidebar "⌘N" hint.
+   Mirrors `.composer .help kbd` + `.chat-side .new-btn kbd` rules in the
+   design source.
+   ============================================================================ */
+
+kbd {
+  font-family: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo,
+    monospace;
+  font-size: 10px;
+  border: 1px solid var(--chat-rule);
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--chat-ink-3);
+  background: transparent;
+  line-height: 1;
+}
