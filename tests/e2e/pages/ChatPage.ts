@@ -28,6 +28,10 @@ export class ChatPage {
   readonly streamingBubble: Locator;
   readonly cancelButton: Locator;
 
+  // ProviderPicker
+  readonly providerPickerTrigger: Locator;
+  readonly providerPickerListbox: Locator;
+
   // Message list
   readonly messageList: Locator;
 
@@ -51,6 +55,9 @@ export class ChatPage {
     this.messageStream = page.getByTestId('message-stream');
     this.streamingBubble = page.getByTestId('message-stream-streaming');
     this.cancelButton = page.getByTestId('message-stream-cancel');
+
+    this.providerPickerTrigger = page.getByTestId('provider-picker-trigger');
+    this.providerPickerListbox = page.getByTestId('provider-picker-listbox');
 
     this.messageList = page.getByTestId('message-list');
 
@@ -116,5 +123,64 @@ export class ChatPage {
    */
   get omittedIndicator(): Locator {
     return this.page.getByTestId('omitted-indicator');
+  }
+
+  // -------------------------------------------------------------------------
+  // ProviderPicker helpers (LLD Tasks 85, 145-147).
+  // -------------------------------------------------------------------------
+
+  /** Open the ProviderPicker dropdown by clicking its trigger. */
+  async openProviderPicker() {
+    await this.providerPickerTrigger.click();
+    await expect(this.providerPickerListbox).toBeVisible();
+  }
+
+  /**
+   * Locator for a specific model option row. Testid format mirrors the
+   * component: `provider-picker-option-<provider>-<model>`.
+   */
+  providerOption(provider: string, model: string): Locator {
+    return this.page.getByTestId(`provider-picker-option-${provider}-${model}`);
+  }
+
+  /**
+   * Open the picker and select the given (provider, model). Waits for the
+   * dropdown to close after selection.
+   */
+  async pickModel(provider: string, model: string) {
+    await this.openProviderPicker();
+    await this.providerOption(provider, model).click();
+    await expect(this.providerPickerListbox).not.toBeVisible();
+  }
+
+  // -------------------------------------------------------------------------
+  // Rendered-bubble helpers (LLD Task 85) — for the Markdown rendering spec.
+  // -------------------------------------------------------------------------
+
+  /** The latest assistant message row in the DOM. */
+  get latestAssistantBubble(): Locator {
+    return this.assistantRows.last();
+  }
+
+  /**
+   * The rendered Markdown content region of the latest assistant bubble (the
+   * `MessageContent` markdown-body, NOT the meta row). Targets the
+   * `data-testid="message-content-markdown"` div MessageContent renders.
+   */
+  get latestAssistantContent(): Locator {
+    return this.latestAssistantBubble.getByTestId('message-content-markdown');
+  }
+
+  /**
+   * Wait until the streaming caret is gone (terminal state reached) AND the
+   * latest assistant bubble shows a provider chip — i.e. a committed turn.
+   */
+  async waitForTerminalState(timeoutMs = 30_000) {
+    await expect(this.streamingBubble).not.toBeVisible({ timeout: timeoutMs });
+    await expect(this.latestAssistantBubble).toBeVisible({ timeout: timeoutMs });
+    // The provider chip appears once the metadata frame committed the turn.
+    await expect(
+      this.latestAssistantBubble.getByTestId('message-stream-provider'),
+    ).toBeVisible({ timeout: timeoutMs });
   }
 }
