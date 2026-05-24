@@ -119,7 +119,12 @@ export class StreamOrchestrator {
               extra: { messageId: this.input.messageId, observedSeq: String(metaSeq) },
             });
           }
-          this.emit(buildMetadataFrame(this.input.messageId, chunk.providerMeta));
+          // Spread into a plain object so TS sees the index-signature shape
+          // the metadata builder expects — the SDK's ProviderMeta is a
+          // closed shape and won't widen to `{ [k]: unknown }` without help.
+          this.emit(
+            buildMetadataFrame(this.input.messageId, { ...chunk.providerMeta }),
+          );
         } else if (chunk.type === 'token') {
           // Race guard #2: a chunk may have been buffered by the iterator
           // BEFORE cancel/disconnect aborted. Re-check after a microtask hop

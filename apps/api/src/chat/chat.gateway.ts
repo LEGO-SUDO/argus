@@ -106,7 +106,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     ];
     const configured = this.catalog.listConfiguredProviders();
     if (configured.length === 0) return null;
-    const configuredNames = new Set(configured.map((c) => c.provider));
+    // Set<string> rather than Set<ProviderName> so the `has(name)` lookup
+    // accepts our `order` array (parsed from env as plain strings — they're
+    // narrowed to the union at parse time but TS doesn't carry that across
+    // the `Set.has` boundary without an explicit cast).
+    const configuredNames = new Set<string>(configured.map((c) => c.provider));
     for (const name of order) {
       if (configuredNames.has(name)) return name;
     }

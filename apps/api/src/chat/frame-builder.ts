@@ -42,7 +42,13 @@ export function buildStartFrame(input: StartFrameInput): WsStartFrame {
 
 export function buildMetadataFrame(
   messageId: string,
-  providerMeta: WsMetadataProviderMeta,
+  // Accept any object with the required provider+model strings; the
+  // contract's `.passthrough()` allows arbitrary sibling keys (LLD Task 4).
+  // We don't tighten to `WsMetadataProviderMeta` here because the orchestrator
+  // forwards the SDK's `ProviderMeta` shape directly — structurally the same
+  // pair plus optional token counts — and TS won't widen from a closed shape
+  // to an index-signatured one without an explicit cast.
+  providerMeta: { provider: string; model: string; [k: string]: unknown },
 ): WsMetadataFrame {
   // seq is literal 1 — pinned in the contract (LLD Task 6) and load-bearing
   // on the orchestrator's start@0 → metadata@1 → token@2..N ordering.
@@ -50,7 +56,7 @@ export function buildMetadataFrame(
     type: 'metadata',
     messageId,
     seq: 1,
-    providerMeta,
+    providerMeta: providerMeta as WsMetadataProviderMeta,
   };
 }
 
