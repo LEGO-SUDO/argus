@@ -12,6 +12,12 @@
 // Graceful shutdown: SIGINT / SIGTERM close the Nest app which fires
 // PrismaService.onModuleDestroy → $disconnect.
 import 'reflect-metadata';
+// OTel init must run BEFORE any module that calls trace.getTracer() at import
+// time (incl. @argus/sdk). NodeSDK auto-instruments node libs on .start() so
+// keeping this at the top of the dependency graph is the safe placement.
+import { initOtel } from './observability/otel';
+initOtel();
+
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { WsAdapter } from '@nestjs/platform-ws';
