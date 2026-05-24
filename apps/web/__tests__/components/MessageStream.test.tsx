@@ -344,6 +344,69 @@ describe('MessageStream — provider/model label', () => {
   });
 });
 
+describe('MessageStream — ContextMeter (LLD Tasks 96-97)', () => {
+  it('sources tokens from the last COMPLETED assistant message, ignoring failed/canceled rows', () => {
+    const stub = makeStubClient();
+    // Order matters: completed (has tokens) → failed (no tokens) → canceled
+    // (no tokens). The meter must read the completed row, NOT the literal
+    // last row.
+    const completed: Message = {
+      id: 'a-complete',
+      role: 'assistant',
+      content: 'done',
+      status: 'complete',
+      provider: 'mock',
+      model: 'mock-1',
+      tokensUsed: 5000,
+      tokensBudget: 10000,
+    };
+    const failed: Message = {
+      id: 'a-failed',
+      role: 'assistant',
+      content: 'boom',
+      status: 'failed',
+      errorCode: 'provider_error',
+      canRetry: true,
+    };
+    const canceled: Message = {
+      id: 'a-canceled',
+      role: 'assistant',
+      content: 'partial',
+      status: 'canceled',
+    };
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[completed, failed, canceled]}
+        wsClient={stub.client}
+      />,
+    );
+    expect(screen.getByTestId('context-meter')).toHaveTextContent(
+      '5k / 10k tokens',
+    );
+  });
+
+  it('renders no meter when there is no completed assistant message', () => {
+    const stub = makeStubClient();
+    const failed: Message = {
+      id: 'a-failed',
+      role: 'assistant',
+      content: 'boom',
+      status: 'failed',
+      errorCode: 'provider_error',
+      canRetry: true,
+    };
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[failed]}
+        wsClient={stub.client}
+      />,
+    );
+    expect(screen.queryByTestId('context-meter')).toBeNull();
+  });
+});
+
 describe('MessageStream — interrupted marker from history', () => {
   it('shows "interrupted" + Retry for restored failed/client_disconnected message', () => {
     const stub = makeStubClient();

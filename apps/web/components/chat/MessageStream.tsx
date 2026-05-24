@@ -65,6 +65,7 @@ import {
   type OpenHandler,
 } from '@/lib/ws-client';
 import { ChatHero } from './ChatHero';
+import { ContextMeter } from './ContextMeter';
 import { MessageComposer } from './MessageComposer';
 import { MessageList, MessageMeta } from './MessageList';
 import { OmittedIndicator } from './OmittedIndicator';
@@ -258,6 +259,22 @@ export function MessageStream({
     return null;
   }, [state.messages]);
 
+  // ContextMeter source (LLD Tasks 96-97): the MOST-RECENT assistant message
+  // whose status is `complete`. We deliberately skip failed/canceled rows —
+  // those never produced a final token-usage report, so their tokens fields
+  // are undefined and the literally-last row may be one of them. Scanning
+  // backwards yields the newest completed turn. Returns null when there is
+  // no completed assistant message yet (the meter then renders nothing).
+  const lastCompletedAssistant = useMemo(() => {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m && m.role === 'assistant' && m.status === 'complete') {
+        return m;
+      }
+    }
+    return null;
+  }, [state.messages]);
+
   // Send handler.
   //
   // Order matters: we attempt the WS send FIRST, then optimistically
@@ -380,6 +397,19 @@ export function MessageStream({
             {state.omittedCount > 0 ? (
               <div className="flex justify-center">
                 <OmittedIndicator count={state.omittedCount} />
+              </div>
+            ) : null}
+
+            {/* ContextMeter (LLD Task 97) — sourced from the most-recent
+             *  completed assistant turn. Returns null when no completed turn
+             *  exists yet (no layout box, no shift). Sits above MessageList,
+             *  below the OmittedIndicator slot per the placement decision. */}
+            {lastCompletedAssistant ? (
+              <div className="flex justify-center">
+                <ContextMeter
+                  tokensUsed={lastCompletedAssistant.tokensUsed}
+                  tokensBudget={lastCompletedAssistant.tokensBudget}
+                />
               </div>
             ) : null}
 
