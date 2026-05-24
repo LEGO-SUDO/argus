@@ -5,7 +5,7 @@
 //   - It NEVER touches `messages` — message status is owned synchronously
 //     by the API gateway. A lint-style test in
 //     projection.service.integration.test.ts greps this file and fails
-//     if `prisma.message` ever appears.
+//     if the forbidden messages-table accessor ever appears in the code.
 //
 // Per-span flow:
 //   1. Validate span shape (zod). Invalid → drop + Sentry recoverable=no.
