@@ -233,8 +233,7 @@ export function MessageComposer({
           <span>
             Previously pinned{' '}
             <span className="mono text-chat-ink">
-              {pinFallbackNotice.previousProvider} ·{' '}
-              {pinFallbackNotice.previousModel}
+              {pinFallbackNotice.provider} · {pinFallbackNotice.model}
             </span>{' '}
             is unavailable — switched to Auto.
           </span>

@@ -27,37 +27,21 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ApiError, authFetch } from './auth-fetch';
 import type { Message } from './message-stream-reducer';
-import type { MessageDto, MessageListResponse } from '@argus/contracts';
+import type {
+  MessageDto,
+  MessageListResponse,
+  PreviouslyPinned,
+} from '@argus/contracts';
 
 // ---------------------------------------------------------------------------
 // PinFallbackNotice — surfaced when the server falls back from a stale pin.
 //
-// The notice payload carries the previously-pinned provider/model strings so
-// the MessageComposer can render an inline notice on first paint. Shape is
-// pinned by the LLD "Locked Contracts" section; the canonical zod schema is
-// owned by the backend worker and merges in the backbone PR.
+// Conforms to the `@argus/contracts` `PreviouslyPinned` shape ({ provider,
+// model }). The notice is shown when the messages-list response carries
+// `pinFallback === true`; its payload is the response's `previouslyPinned`
+// object naming the (now unavailable) pinned provider/model.
 // ---------------------------------------------------------------------------
-export type PinFallbackNotice = {
-  previousProvider: string;
-  previousModel: string;
-};
-
-// Extended response shape — same as MessageListResponse plus the optional
-// notice and the conversation's current pin. Once the contracts side adds
-// these we can drop this local widening.
-type MessageListResponseExt = MessageListResponse & {
-  pinFallbackNotice?: PinFallbackNotice;
-  pinnedProvider?: string | null;
-  pinnedModel?: string | null;
-};
-
-// MessageDto-side extension for tokensUsed/tokensBudget that the backend
-// will add in the same PR. We read them defensively so a build whose
-// contracts haven't shipped yet still compiles.
-type MessageDtoExt = MessageDto & {
-  tokensUsed?: number;
-  tokensBudget?: number;
-};
+export type PinFallbackNotice = PreviouslyPinned;
 
 // Browser-only fetch for message history. We call `authFetch` directly
 // (rather than the shared `getMessages` in `conversations-api.ts`) so this
@@ -68,32 +52,51 @@ type MessageDtoExt = MessageDto & {
 // even when the browser branch never reaches the server-only code path —
 // Webpack tracks the static import graph, not the runtime branch.
 type FetchResult = {
-  messages: MessageDtoExt[];
+  messages: MessageDto[];
   omittedCount: number;
   pinFallbackNotice?: PinFallbackNotice;
   pinnedProvider?: string | null;
   pinnedModel?: string | null;
+  // Response-level token usage for the latest COMPLETED turn (HLD D5). The
+  // contract carries these at the response root (NOT per-message), so we
+  // thread them down and graft them onto the latest completed assistant row
+  // during mapping (see `mapHistory`).
+  tokensUsed?: number;
+  tokensBudget?: number;
 };
 
 async function fetchMessagesFromBrowser(
   conversationId: string,
 ): Promise<FetchResult> {
-  const res = await authFetch<MessageListResponseExt>(
+  const res = await authFetch<MessageListResponse>(
     `/api/conversations/${conversationId}/messages`,
     { method: 'GET' },
   );
   const out: FetchResult = {
-    messages: res.messages as MessageDtoExt[],
+    messages: res.messages,
     omittedCount: res.omittedCount ?? 0,
   };
-  if (res.pinFallbackNotice) {
-    out.pinFallbackNotice = res.pinFallbackNotice;
+  // Pin-fallback (contract: pinFallback boolean + previouslyPinned object).
+  // Only surface a notice when the server actually flagged a fallback AND
+  // named what was dropped — never invent a stale value.
+  if (res.pinFallback === true && res.previouslyPinned) {
+    out.pinFallbackNotice = res.previouslyPinned;
   }
-  if (res.pinnedProvider !== undefined) {
-    out.pinnedProvider = res.pinnedProvider;
+  // Current pin travels on the embedded conversation DTO (contract: optional
+  // nullable pinnedProvider/pinnedModel on `ConversationDto`).
+  if (res.conversation) {
+    if (res.conversation.pinnedProvider !== undefined) {
+      out.pinnedProvider = res.conversation.pinnedProvider;
+    }
+    if (res.conversation.pinnedModel !== undefined) {
+      out.pinnedModel = res.conversation.pinnedModel;
+    }
   }
-  if (res.pinnedModel !== undefined) {
-    out.pinnedModel = res.pinnedModel;
+  if (typeof res.tokensUsed === 'number') {
+    out.tokensUsed = res.tokensUsed;
+  }
+  if (typeof res.tokensBudget === 'number') {
+    out.tokensBudget = res.tokensBudget;
   }
   return out;
 }
@@ -207,7 +210,7 @@ export function useConversationHistory(
         const result = await fetchMessagesFromBrowser(conversationId);
         if (cancelled) return;
         const snapshot: HistorySnapshot = {
-          messages: result.messages.map(toReducerMessage),
+          messages: mapHistory(result),
           omittedCount: result.omittedCount,
           // Only set the notice when the response actually carried one — do
           // not invent a stale value (Task 31-32).
@@ -326,10 +329,42 @@ function readySnapshotFrom(
   };
 }
 
-function toReducerMessage(dto: MessageDtoExt): Message {
+/**
+ * Map the fetched history into reducer `Message[]`, grafting the
+ * response-level token usage onto the latest COMPLETED assistant row.
+ *
+ * The contract (HLD D5) carries `tokensUsed`/`tokensBudget` at the response
+ * ROOT — they describe the latest completed turn, not any single message DTO
+ * (which has no token fields). The `ContextMeter` host in `MessageStream`
+ * scans backwards for the most-recent completed assistant message and reads
+ * its tokens, so we attach the response figures there. This makes a resumed
+ * conversation paint the meter on first render (LLD Task 97 fallback) without
+ * lifting meter state out of the reducer.
+ */
+function mapHistory(result: FetchResult): Message[] {
+  const messages = result.messages.map(toReducerMessage);
+  if (
+    typeof result.tokensUsed === 'number' &&
+    typeof result.tokensBudget === 'number'
+  ) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === 'assistant' && m.status === 'complete') {
+        m.tokensUsed = result.tokensUsed;
+        m.tokensBudget = result.tokensBudget;
+        break;
+      }
+    }
+  }
+  return messages;
+}
+
+function toReducerMessage(dto: MessageDto): Message {
   // Mirror of the mapper that previously lived in
   // `app/chat/[conversationId]/page.tsx`. Kept here so the client-side
-  // hydration path stays self-contained.
+  // hydration path stays self-contained. Token usage is NOT per-message in
+  // the contract — it rides the response root and is grafted on in
+  // `mapHistory`.
   const m: Message = {
     id: dto.id,
     role: dto.role,
@@ -341,15 +376,6 @@ function toReducerMessage(dto: MessageDtoExt): Message {
   if (dto.errorCode) m.errorCode = dto.errorCode;
   if (dto.status === 'failed') {
     m.canRetry = true;
-  }
-  // LLD Tasks 21-22: hydrate token-usage fields verbatim from the DTO.
-  // Defensive `typeof` check — the contracts module on this branch does
-  // not yet declare these fields, so older payloads omit them entirely.
-  if (typeof dto.tokensUsed === 'number') {
-    m.tokensUsed = dto.tokensUsed;
-  }
-  if (typeof dto.tokensBudget === 'number') {
-    m.tokensBudget = dto.tokensBudget;
   }
   return m;
 }

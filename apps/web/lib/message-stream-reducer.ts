@@ -31,36 +31,20 @@ import type {
   WsEndFrame,
   WsErrorFrame,
   WsFrameOutbound,
+  WsMetadataFrame,
   WsStartFrame,
   WsTokenFrame,
 } from '@argus/contracts';
 
-// ---------------------------------------------------------------------------
-// MetadataFrame — local type mirroring the LLD "Locked Contracts" shape.
-//
-// The canonical zod schema lives in `@argus/contracts/ws` and is owned by the
-// backend worker on the sibling branch; the two branches are merged at the
-// /oh final gate. Until then this client-side type pins the wire shape the
-// reducer is built against. When the merge lands the import should switch
-// to `WsMetadataFrame` from `@argus/contracts` and this declaration removed.
-// ---------------------------------------------------------------------------
-export type WsMetadataFrame = {
-  type: 'metadata';
-  messageId: string;
-  seq: number;
-  providerMeta: {
-    provider: string;
-    model: string;
-    // Open-shaped per HLD D1 — extra fields are allowed and ignored by the
-    // reducer (we only read `.provider` and `.model`).
-    [k: string]: unknown;
-  };
-};
+// The reducer switches over the canonical outbound discriminated union from
+// `@argus/contracts` (which already includes the metadata frame). Re-exported
+// under the historical `StreamFrame` name so existing call sites/tests that
+// import it keep working.
+export type StreamFrame = WsFrameOutbound;
 
-// Reducer-side widened frame type — the outbound discriminated union from
-// contracts plus the metadata-frame shape. This is what the reducer's
-// `applyFrame` switches over.
-export type StreamFrame = WsFrameOutbound | WsMetadataFrame;
+// Re-export the canonical metadata frame type so any consumer that imported it
+// from this module continues to resolve to the contract type.
+export type { WsMetadataFrame };
 
 export type MessageRole = 'user' | 'assistant' | 'system';
 
@@ -272,8 +256,9 @@ function applyStart(state: State, frame: WsStartFrame): State {
   // provider/model yet. The metadata frame (emitted once after the SDK
   // commit chunk) fills those in. This matches HLD D1: there is no
   // "provisional" provider; the committed adapter is the single source of
-  // truth. If we wrote frame.provider/frame.model here we'd reintroduce the
-  // race where a pre-token failure displays a misleading provider name.
+  // truth. The contract's `WsStartFrame` is identity-only (messageId,
+  // conversationId, seq=0) — it carries no provider/model to read, so the
+  // misleading-provider race is structurally impossible.
   const streaming: StreamingMessage = {
     id: frame.messageId,
     role: 'assistant',
@@ -281,11 +266,6 @@ function applyStart(state: State, frame: WsStartFrame): State {
     status: 'streaming',
     lastAppliedSeq: 0,
   };
-  // `frame.provider` / `frame.model` are intentionally NOT read here. They
-  // remain on the wire shape for backward compatibility with older builds
-  // until the contracts package drops them in the backbone PR.
-  void frame.provider;
-  void frame.model;
   return {
     ...state,
     streaming,
@@ -361,26 +341,18 @@ function applyEnd(state: State, frame: WsEndFrame): State {
     lastAppliedSeq: undefined,
   };
   // LLD Tasks 17-20: tokensUsed/tokensBudget are copied onto the promoted
-  // message ONLY on status === 'complete'. Failed/canceled frames may
-  // technically carry numbers but they are not meaningful (the turn never
-  // produced a final usage report) — drop them so the ContextMeter never
-  // reads from a non-complete row.
-  //
-  // The end frame's wire shape (per backbone-PR contract) carries optional
-  // numeric `tokensUsed` and `tokensBudget` fields alongside `status`. We
-  // access them defensively because the current `@argus/contracts` build
-  // does not yet declare them in the zod schema — once it does, the cast
-  // can drop.
+  // message ONLY on status === 'complete'. The contract's `WsEndFrame`
+  // declares both as top-level optional non-negative integers and its zod
+  // schema rejects them on any non-complete terminal, so a failed/canceled
+  // frame can never legitimately carry them — but we still gate on status
+  // here so the reducer never reads usage off a non-complete row even if a
+  // malformed frame slips past parsing.
   if (frame.status === 'complete') {
-    const fWithTokens = frame as WsEndFrame & {
-      tokensUsed?: number;
-      tokensBudget?: number;
-    };
-    if (typeof fWithTokens.tokensUsed === 'number') {
-      promoted.tokensUsed = fWithTokens.tokensUsed;
+    if (typeof frame.tokensUsed === 'number') {
+      promoted.tokensUsed = frame.tokensUsed;
     }
-    if (typeof fWithTokens.tokensBudget === 'number') {
-      promoted.tokensBudget = fWithTokens.tokensBudget;
+    if (typeof frame.tokensBudget === 'number') {
+      promoted.tokensBudget = frame.tokensBudget;
     }
   }
   return {
