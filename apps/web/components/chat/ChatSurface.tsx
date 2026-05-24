@@ -38,6 +38,10 @@ import {
   primeConversationHistoryCache,
   useConversationHistory,
 } from '@/lib/use-conversation-history';
+import {
+  fetchProviderCatalog,
+  type ProviderCatalog,
+} from '@/lib/providers-api';
 
 // Match `/chat/<uuid>` and capture the id. Anything else (including bare
 // `/chat`) resolves to null — the new-conversation surface.
@@ -89,6 +93,45 @@ export function ChatSurface() {
   const history = useConversationHistory(conversationId, {
     skipFor: mintedIds,
   });
+
+  // ----- Provider catalog fetch (LLD Tasks 119-122). -----
+  // Fetched once on mount. The state machine is idle → loading → ready |
+  // error. On error the surface still renders; we pass an empty catalog into
+  // MessageComposer so the picker uses its empty-state branch (effectively
+  // disabled) and surface a small inline notice near the composer.
+  type CatalogState =
+    | { status: 'idle' }
+    | { status: 'loading' }
+    | { status: 'ready'; catalog: ProviderCatalog }
+    | { status: 'error' };
+  const [catalogState, setCatalogState] = useState<CatalogState>({
+    status: 'idle',
+  });
+  useEffect(() => {
+    let cancelled = false;
+    setCatalogState({ status: 'loading' });
+    void fetchProviderCatalog()
+      .then((catalog) => {
+        if (cancelled) return;
+        setCatalogState({ status: 'ready', catalog });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Swallow the specific error — the picker just falls back to its
+        // empty-state branch. The inline notice tells the user why.
+        setCatalogState({ status: 'error' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The catalog handed to MessageComposer. On error we pass an empty catalog
+  // so the picker renders its disabled empty-state branch.
+  const composerCatalog: ProviderCatalog =
+    catalogState.status === 'ready'
+      ? catalogState.catalog
+      : { providers: [] };
 
   // Callback handed to MessageStream — invoked when the WS start frame
   // hands us a freshly-minted conversation id. We mark the id as
@@ -143,14 +186,37 @@ export function ChatSurface() {
     history.status === 'ready' ? history.messages : [];
   const omittedCount =
     history.status === 'ready' ? history.omittedCount : 0;
+  // Pin + fallback notice threaded from the history hook (LLD Tasks 123-124,
+  // 134-135).
+  const pinnedProvider =
+    history.status === 'ready' ? (history.pinnedProvider ?? null) : null;
+  const pinnedModel =
+    history.status === 'ready' ? (history.pinnedModel ?? null) : null;
+  const pinFallbackNotice =
+    history.status === 'ready' ? history.pinFallbackNotice : undefined;
 
   return (
-    <MessageStream
-      key={mountKey}
-      conversationId={conversationId}
-      initialMessages={initialMessages}
-      omittedCount={omittedCount}
-      onConversationMinted={handleConversationMinted}
-    />
+    <>
+      {catalogState.status === 'error' ? (
+        <div
+          role="status"
+          data-testid="catalog-unavailable-notice"
+          className="mx-auto mt-3 max-w-[720px] rounded-[6px] border border-chat-rule bg-chat-panel px-3 py-2 text-[12px] text-chat-ink-2"
+        >
+          Model catalog unavailable — model switching is disabled for now.
+        </div>
+      ) : null}
+      <MessageStream
+        key={mountKey}
+        conversationId={conversationId}
+        initialMessages={initialMessages}
+        omittedCount={omittedCount}
+        onConversationMinted={handleConversationMinted}
+        providerCatalog={composerCatalog}
+        pinnedProvider={pinnedProvider}
+        pinnedModel={pinnedModel}
+        pinFallbackNotice={pinFallbackNotice}
+      />
+    </>
   );
 }

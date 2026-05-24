@@ -33,6 +33,17 @@ import {
   type KeyboardEvent,
 } from 'react';
 
+import { ApiError } from '@/lib/auth-fetch';
+import {
+  clearConversationPin,
+  patchConversationPin,
+  type ProviderCatalog,
+} from '@/lib/providers-api';
+import { clearPinFallbackNotice } from '@/lib/use-conversation-history';
+import type { PinFallbackNotice } from '@/lib/use-conversation-history';
+import { useFocusComposer } from '@/lib/use-focus-composer';
+import { ProviderPicker } from './ProviderPicker';
+
 type MessageComposerProps = {
   /** True while the reducer holds the composer lock (turn in flight OR
    *  socket dead). Disables the textarea and the Send button. */
@@ -40,13 +51,29 @@ type MessageComposerProps = {
   /** True while a turn is actively streaming. When true the Send button
    *  is swapped for a Cancel button. Always implies `disabled` too. */
   streaming?: boolean;
-  /** Number of providers the gateway has configured. Surfaced in the pill
-   *  chip — see lib/conversations-api in a future iteration. Defaults to
-   *  1 (mock provider) to keep the chip honest until the API surfaces a
-   *  real count. */
+  /** Number of providers the gateway has configured. Surfaced in the legacy
+   *  pill chip — only rendered when no `catalog` prop is supplied (i.e. the
+   *  pre-ProviderPicker call shape). Defaults to 1. */
   providersConfigured?: number;
   onSend: (text: string) => void;
   onCancel?: () => void;
+
+  // ----- ProviderPicker wiring (LLD Block G2/G3). All optional so legacy
+  // call sites (and tests) that don't pass a catalog keep the old pills. -----
+
+  /** Active conversation id — needed to PATCH the pin and to drive the
+   *  focus hook. Null on the new-conversation surface. */
+  conversationId?: string | null;
+  /** Provider catalog from `fetchProviderCatalog`. When present the static
+   *  pills are replaced by the ProviderPicker. */
+  catalog?: ProviderCatalog;
+  /** Current conversation pin (from useConversationHistory). */
+  pinnedProvider?: string | null;
+  /** Current conversation pin model. */
+  pinnedModel?: string | null;
+  /** Inline "previously-pinned model unavailable" notice (first paint of a
+   *  resumed conversation whose stale pin fell back). */
+  pinFallbackNotice?: PinFallbackNotice;
 };
 
 const MIN_HEIGHT_PX = 44;
@@ -58,9 +85,90 @@ export function MessageComposer({
   providersConfigured = 1,
   onSend,
   onCancel,
+  conversationId = null,
+  catalog,
+  pinnedProvider = null,
+  pinnedModel = null,
+  pinFallbackNotice,
 }: MessageComposerProps) {
   const [text, setText] = useState('');
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Auto-focus the composer on mount, on streaming-lock release, and on
+  // conversation switch (LLD Task 140 / Block C).
+  useFocusComposer({ ref: taRef, streaming, disabled, conversationId });
+
+  // ----- Optimistic pin state (LLD Tasks 125-130). -----
+  // The picker reflects the local optimistic pin immediately; on PATCH
+  // failure we roll back to the previous values and surface an inline error.
+  const [optimisticPin, setOptimisticPin] = useState<{
+    provider: string | null;
+    model: string | null;
+  }>({ provider: pinnedProvider, model: pinnedModel });
+  // Keep the optimistic pin in sync when the upstream prop changes (e.g. a
+  // resumed conversation hydrates with a different pin). We only resync when
+  // the incoming prop pair actually differs from what we're showing so a
+  // successful optimistic update isn't clobbered by the same value.
+  useEffect(() => {
+    setOptimisticPin({ provider: pinnedProvider, model: pinnedModel });
+  }, [pinnedProvider, pinnedModel]);
+
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  const handlePin = useCallback(
+    (provider: string, model: string) => {
+      if (!conversationId) return;
+      const previous = optimisticPin;
+      setOptimisticPin({ provider, model });
+      setPinError(null);
+      void patchConversationPin(conversationId, {
+        pinnedProvider: provider,
+        pinnedModel: model,
+      }).catch((err: unknown) => {
+        // Roll back the optimistic pin and surface an inline notice.
+        setOptimisticPin(previous);
+        setPinError(
+          err instanceof ApiError
+            ? `Could not pin model (${err.code ?? err.status}).`
+            : 'Could not pin model. Please try again.',
+        );
+      });
+    },
+    [conversationId, optimisticPin],
+  );
+
+  const handleClear = useCallback(() => {
+    if (!conversationId) return;
+    const previous = optimisticPin;
+    setOptimisticPin({ provider: null, model: null });
+    setPinError(null);
+    void clearConversationPin(conversationId).catch((err: unknown) => {
+      setOptimisticPin(previous);
+      setPinError(
+        err instanceof ApiError
+          ? `Could not switch to Auto (${err.code ?? err.status}).`
+          : 'Could not switch to Auto. Please try again.',
+      );
+    });
+  }, [conversationId, optimisticPin]);
+
+  // ----- Inline pin-fallback notice dismissal (LLD Tasks 132-139). -----
+  // The notice is sourced from the prop (cache-backed); dismissal calls the
+  // cache helper so it doesn't re-show on the next render. We do NOT keep a
+  // separate local "hidden" flag — the cache mutation is the single source
+  // of truth (Task 139). To reflect the dismissal within this mount (the
+  // prop won't change until the hook re-reads the cache), we track the id we
+  // dismissed for and suppress rendering for that id.
+  const [dismissedForId, setDismissedForId] = useState<string | null>(null);
+  const noticeVisible =
+    pinFallbackNotice !== undefined && dismissedForId !== conversationId;
+
+  const handleDismissNotice = useCallback(() => {
+    if (conversationId) {
+      clearPinFallbackNotice(conversationId);
+      setDismissedForId(conversationId);
+    }
+  }, [conversationId]);
 
   // Auto-grow the textarea to fit content, clamped between MIN/MAX. Runs on
   // every text change; resetting to `auto` first is critical so shrink
@@ -113,6 +221,35 @@ export function MessageComposer({
           'linear-gradient(to bottom, transparent, var(--chat-bg) 24%)',
       }}
     >
+      {/* Inline "previously-pinned model unavailable" notice (LLD Block G3).
+       *  Sits above the composer body; dismissable via the cache helper so it
+       *  doesn't re-show on the next render. */}
+      {noticeVisible && pinFallbackNotice ? (
+        <div
+          data-testid="pin-fallback-notice"
+          role="status"
+          className="mx-auto mb-2 flex max-w-[720px] items-start justify-between gap-2 rounded-[8px] border border-chat-rule bg-chat-panel px-3 py-2 text-[12px] text-chat-ink-2"
+        >
+          <span>
+            Previously pinned{' '}
+            <span className="mono text-chat-ink">
+              {pinFallbackNotice.previousProvider} ·{' '}
+              {pinFallbackNotice.previousModel}
+            </span>{' '}
+            is unavailable — switched to Auto.
+          </span>
+          <button
+            type="button"
+            data-testid="pin-fallback-notice-dismiss"
+            aria-label="Dismiss notice"
+            onClick={handleDismissNotice}
+            className="shrink-0 rounded-[4px] px-1 text-chat-ink-3 transition-colors hover:text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+
       <form
         onSubmit={handleSubmit}
         data-testid="message-composer"
@@ -145,22 +282,49 @@ export function MessageComposer({
 
         <div className="flex items-center justify-between pt-1.5">
           <div className="flex items-center gap-1.5 text-[12px] text-chat-ink-3">
-            <span
-              data-testid="message-composer-provider-pill"
-              className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
-            >
-              <span className="prov" data-prov="mock">
-                <span className="swatch" aria-hidden="true" />
+            {catalog ? (
+              // LLD Task 126 — ProviderPicker replaces the static pills once
+              // the catalog is wired in. Reflects the optimistic pin; pin
+              // failures roll back + surface the inline error below.
+              <ProviderPicker
+                catalog={catalog}
+                pinnedProvider={optimisticPin.provider}
+                pinnedModel={optimisticPin.model}
+                onPin={handlePin}
+                onClear={handleClear}
+                streaming={streaming}
+              />
+            ) : (
+              // Legacy static pills — kept for call sites that don't yet pass
+              // a catalog (and the pre-existing composer tests).
+              <>
+                <span
+                  data-testid="message-composer-provider-pill"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
+                >
+                  <span className="prov" data-prov="mock">
+                    <span className="swatch" aria-hidden="true" />
+                  </span>
+                  auto-failover
+                </span>
+                <span
+                  data-testid="message-composer-providers-count"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
+                >
+                  {providersConfigured} provider
+                  {providersConfigured === 1 ? '' : 's'} configured
+                </span>
+              </>
+            )}
+            {pinError ? (
+              <span
+                data-testid="pin-error-notice"
+                role="alert"
+                className="text-[11.5px] text-err"
+              >
+                {pinError}
               </span>
-              auto-failover
-            </span>
-            <span
-              data-testid="message-composer-providers-count"
-              className="inline-flex items-center gap-1.5 rounded-full border border-chat-rule bg-chat-panel px-2.5 py-[3px] text-[11.5px] text-chat-ink-2"
-            >
-              {providersConfigured} provider
-              {providersConfigured === 1 ? '' : 's'} configured
-            </span>
+            ) : null}
           </div>
 
           {streaming ? (

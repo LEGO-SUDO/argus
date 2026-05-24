@@ -43,9 +43,12 @@ export type PinFallbackNotice = {
 };
 
 // Extended response shape — same as MessageListResponse plus the optional
-// notice. Once the contracts side adds it we can drop this local widening.
+// notice and the conversation's current pin. Once the contracts side adds
+// these we can drop this local widening.
 type MessageListResponseExt = MessageListResponse & {
   pinFallbackNotice?: PinFallbackNotice;
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 };
 
 // MessageDto-side extension for tokensUsed/tokensBudget that the backend
@@ -64,27 +67,33 @@ type MessageDtoExt = MessageDto & {
 //   "You're importing a component that needs 'server-only'"
 // even when the browser branch never reaches the server-only code path —
 // Webpack tracks the static import graph, not the runtime branch.
-async function fetchMessagesFromBrowser(
-  conversationId: string,
-): Promise<{
+type FetchResult = {
   messages: MessageDtoExt[];
   omittedCount: number;
   pinFallbackNotice?: PinFallbackNotice;
-}> {
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
+};
+
+async function fetchMessagesFromBrowser(
+  conversationId: string,
+): Promise<FetchResult> {
   const res = await authFetch<MessageListResponseExt>(
     `/api/conversations/${conversationId}/messages`,
     { method: 'GET' },
   );
-  const out: {
-    messages: MessageDtoExt[];
-    omittedCount: number;
-    pinFallbackNotice?: PinFallbackNotice;
-  } = {
+  const out: FetchResult = {
     messages: res.messages as MessageDtoExt[],
     omittedCount: res.omittedCount ?? 0,
   };
   if (res.pinFallbackNotice) {
     out.pinFallbackNotice = res.pinFallbackNotice;
+  }
+  if (res.pinnedProvider !== undefined) {
+    out.pinnedProvider = res.pinnedProvider;
+  }
+  if (res.pinnedModel !== undefined) {
+    out.pinnedModel = res.pinnedModel;
   }
   return out;
 }
@@ -93,6 +102,8 @@ type HistorySnapshot = {
   messages: Message[];
   omittedCount: number;
   pinFallbackNotice?: PinFallbackNotice;
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 };
 
 // Module-level cache. Lives for the lifetime of the SPA session.
@@ -112,6 +123,10 @@ export type ConversationHistoryState =
        * in MessageComposer. Cleared via `clearPinFallbackNotice`.
        */
       pinFallbackNotice?: PinFallbackNotice;
+      /** Current conversation pin — threaded to MessageComposer →
+       *  ProviderPicker (LLD Task 123-124). Absent/null means Auto. */
+      pinnedProvider?: string | null;
+      pinnedModel?: string | null;
     }
   | { status: 'error'; conversationId: string; error: Error };
 
@@ -199,6 +214,12 @@ export function useConversationHistory(
           ...(result.pinFallbackNotice
             ? { pinFallbackNotice: result.pinFallbackNotice }
             : {}),
+          ...(result.pinnedProvider !== undefined
+            ? { pinnedProvider: result.pinnedProvider }
+            : {}),
+          ...(result.pinnedModel !== undefined
+            ? { pinnedModel: result.pinnedModel }
+            : {}),
         };
         cache.set(conversationId, snapshot);
         setState(readySnapshotFrom(conversationId, snapshot));
@@ -256,10 +277,17 @@ export function clearPinFallbackNotice(conversationId: string): void {
   if (!entry) return;
   if (entry.pinFallbackNotice === undefined) return;
   // Mutate-in-place by writing a fresh entry that preserves every other
-  // field — keeps the API surface "delete just the notice".
+  // field — keeps the API surface "delete just the notice" while preserving
+  // messages, omittedCount, and the current pin (Task 29-30).
   const next: HistorySnapshot = {
     messages: entry.messages,
     omittedCount: entry.omittedCount,
+    ...(entry.pinnedProvider !== undefined
+      ? { pinnedProvider: entry.pinnedProvider }
+      : {}),
+    ...(entry.pinnedModel !== undefined
+      ? { pinnedModel: entry.pinnedModel }
+      : {}),
   };
   cache.set(conversationId, next);
 }
@@ -279,16 +307,23 @@ function readySnapshotFrom(
   conversationId: string,
   snapshot: HistorySnapshot,
 ): ConversationHistoryState {
-  const base = {
+  return {
     status: 'ready' as const,
     conversationId,
     messages: snapshot.messages,
     omittedCount: snapshot.omittedCount,
+    // Spread the optional fields only when set so the consumer's truthy
+    // checks stay simple (no stray `undefined` keys).
+    ...(snapshot.pinFallbackNotice
+      ? { pinFallbackNotice: snapshot.pinFallbackNotice }
+      : {}),
+    ...(snapshot.pinnedProvider !== undefined
+      ? { pinnedProvider: snapshot.pinnedProvider }
+      : {}),
+    ...(snapshot.pinnedModel !== undefined
+      ? { pinnedModel: snapshot.pinnedModel }
+      : {}),
   };
-  if (snapshot.pinFallbackNotice) {
-    return { ...base, pinFallbackNotice: snapshot.pinFallbackNotice };
-  }
-  return base;
 }
 
 function toReducerMessage(dto: MessageDtoExt): Message {

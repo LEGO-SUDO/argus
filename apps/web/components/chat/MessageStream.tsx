@@ -70,6 +70,8 @@ import { MessageComposer } from './MessageComposer';
 import { MessageContent } from './MessageContent';
 import { MessageList, MessageMeta } from './MessageList';
 import { OmittedIndicator } from './OmittedIndicator';
+import type { ProviderCatalog } from '@/lib/providers-api';
+import type { PinFallbackNotice } from '@/lib/use-conversation-history';
 import type { WsFrameInbound } from '@argus/contracts';
 
 /**
@@ -108,6 +110,17 @@ type MessageStreamProps = {
    * Optional so tests don't have to thread it through.
    */
   onConversationMinted?: (conversationId: string) => void;
+
+  // ----- ProviderPicker wiring, threaded through to MessageComposer (LLD
+  // Block G2/G3). All optional so existing tests/call sites that omit them
+  // fall back to the composer's legacy pills. -----
+  /** Provider catalog from ChatSurface's mount-time fetch. */
+  providerCatalog?: ProviderCatalog;
+  /** Conversation pin (from useConversationHistory via ChatSurface). */
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
+  /** Inline stale-pin fallback notice (first paint of a resumed convo). */
+  pinFallbackNotice?: PinFallbackNotice;
 };
 
 export function MessageStream({
@@ -116,6 +129,10 @@ export function MessageStream({
   omittedCount = 0,
   wsClient,
   onConversationMinted,
+  providerCatalog,
+  pinnedProvider = null,
+  pinnedModel = null,
+  pinFallbackNotice,
 }: MessageStreamProps) {
   const router = useRouter();
   // Lazy init — applies `initialMessages` + `omittedCount` on first render
@@ -469,6 +486,16 @@ export function MessageStream({
         streaming={streaming !== null}
         onSend={handleSend}
         onCancel={handleCancel}
+        // ProviderPicker wiring (LLD Block G2/G3). `conversationId` is the
+        // prop from ChatSurface (derived from the pathname); it is null on a
+        // brand-new conversation until the URL swap, at which point the
+        // picker can PATCH the minted id. Pinning before the first send is a
+        // no-op (no conversation row exists yet) — acceptable for v1.
+        conversationId={conversationId}
+        catalog={providerCatalog}
+        pinnedProvider={pinnedProvider}
+        pinnedModel={pinnedModel}
+        pinFallbackNotice={pinFallbackNotice}
       />
     </section>
   );

@@ -62,6 +62,20 @@ function stubHistory(
   authFetchMock.mockResolvedValueOnce({ messages, omittedCount });
 }
 
+// ChatSurface fetches the provider catalog on mount (LLD Task 120). Mock the
+// helper so existing tests don't issue a real request; default to an empty
+// catalog (resolved) in beforeEach below.
+const fetchProviderCatalogMock = jest.fn();
+jest.mock('@/lib/providers-api', () => {
+  const actual = jest.requireActual('@/lib/providers-api') as object;
+  return {
+    __esModule: true,
+    ...actual,
+    fetchProviderCatalog: (...args: unknown[]) =>
+      fetchProviderCatalogMock(...args),
+  };
+});
+
 // Render counter — assigned a fresh instance id per MessageStream mount so
 // we can detect remounts across rerenders. The mock also captures the
 // latest `onConversationMinted` callback so individual tests can simulate
@@ -114,6 +128,10 @@ beforeEach(() => {
   latestOnMinted = undefined;
   propsLog.length = 0;
   authFetchMock.mockReset();
+  // Default the catalog fetch to a resolved empty catalog so existing tests
+  // that don't exercise the picker just work. Cases that care override it.
+  fetchProviderCatalogMock.mockReset();
+  fetchProviderCatalogMock.mockResolvedValue({ providers: [] });
   _resetConversationHistoryCacheForTests();
 });
 
