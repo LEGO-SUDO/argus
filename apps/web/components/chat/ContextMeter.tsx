@@ -23,13 +23,19 @@ export function ContextMeter({ tokensUsed, tokensBudget }: ContextMeterProps) {
   if (tokensBudget === null || tokensBudget === undefined) return null;
   if (tokensBudget === 0) return null;
 
+  // Use the SAME formatted values in the accessible label as the visible text
+  // (design review FIX 6) so a screen reader hears "8.2k of 10k", matching the
+  // "8.2k / 10k tokens" on screen — not the raw integers "8200 of 10000".
+  const usedLabel = formatTokens(tokensUsed);
+  const budgetLabel = formatTokens(tokensBudget);
+
   return (
     <div
       data-testid="context-meter"
       className="mono text-[11.5px] text-chat-ink-3"
-      aria-label={`${tokensUsed} of ${tokensBudget} context tokens used`}
+      aria-label={`${usedLabel} of ${budgetLabel} context tokens used`}
     >
-      {formatTokens(tokensUsed)} / {formatTokens(tokensBudget)} tokens
+      {usedLabel} / {budgetLabel} tokens
     </div>
   );
 }

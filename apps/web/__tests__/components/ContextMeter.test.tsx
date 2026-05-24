@@ -20,6 +20,21 @@ describe('ContextMeter', () => {
     );
   });
 
+  // Design review FIX 6 — the accessible name must use the SAME formatted
+  // values as the visible text ("8.2k of 10k"), not the raw integers
+  // ("8200 of 10000") which previously read out mismatched to sighted users.
+  it('uses the formatted (not raw) values in the aria-label', () => {
+    render(<ContextMeter tokensUsed={8200} tokensBudget={10000} />);
+    const meter = screen.getByTestId('context-meter');
+    expect(meter).toHaveAttribute(
+      'aria-label',
+      '8.2k of 10k context tokens used',
+    );
+    // Guard against a regression to the raw integers.
+    expect(meter.getAttribute('aria-label')).not.toContain('8200');
+    expect(meter.getAttribute('aria-label')).not.toContain('10000');
+  });
+
   // Task 94-95 — guards
   it('renders nothing when budget is 0', () => {
     const { container } = render(
