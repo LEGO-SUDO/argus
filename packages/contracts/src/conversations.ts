@@ -129,6 +129,12 @@ export const PreviouslyPinnedSchema = z.object({
 export type PreviouslyPinned = z.infer<typeof PreviouslyPinnedSchema>;
 
 export const MessageListResponseSchema = z.object({
+  // chat-context-and-ux-polish LLD Task 86 — the conversation DTO travels
+  // with the messages list so the picker can render the current (effective)
+  // pin state. When a persisted pin has fallen back (see `pinFallback`), the
+  // DTO carries both pin fields as null. Optional so a pre-backbone backend
+  // that doesn't emit it still parses.
+  conversation: ConversationDtoSchema.optional(),
   messages: z.array(MessageDtoSchema),
   // Number of older messages omitted from the returned page because of the
   // context window cap (HLD D6). Used by the "N earlier messages omitted

@@ -11,6 +11,7 @@ import {
   WsFrameOutboundSchema,
   WsEndFrameSchema,
 } from '../ws';
+import type { WsEndStatus } from '../ws';
 import { randomUUID } from 'crypto';
 
 const messageId = randomUUID();
@@ -156,5 +157,65 @@ describe('WsEndFrameSchema — optional context fields (Tasks 7/8)', () => {
       tokensBudget: -100,
     });
     expect(out.success).toBe(false);
+  });
+
+  // chat-context-and-ux-polish (Codex review — schema-level enforcement of
+  // HLD D5: context fields are valid ONLY on `status: 'complete'`).
+  describe('context fields are gated to status=complete', () => {
+    for (const status of ['failed', 'canceled'] as WsEndStatus[]) {
+      it(`rejects tokensUsed when status is "${status}"`, () => {
+        const out = WsEndFrameSchema.safeParse({
+          type: 'end',
+          messageId,
+          seq: 5,
+          status,
+          tokensUsed: 100,
+        });
+        expect(out.success).toBe(false);
+      });
+
+      it(`rejects tokensBudget when status is "${status}"`, () => {
+        const out = WsEndFrameSchema.safeParse({
+          type: 'end',
+          messageId,
+          seq: 5,
+          status,
+          tokensBudget: 10000,
+        });
+        expect(out.success).toBe(false);
+      });
+
+      it(`accepts a "${status}" end frame WITHOUT context fields`, () => {
+        const out = WsEndFrameSchema.safeParse({
+          type: 'end',
+          messageId,
+          seq: 5,
+          status,
+        });
+        expect(out.success).toBe(true);
+      });
+    }
+
+    it('enforces the same constraint through the outbound discriminated union', () => {
+      const bad = WsFrameOutboundSchema.safeParse({
+        type: 'end',
+        messageId,
+        seq: 5,
+        status: 'failed',
+        tokensUsed: 100,
+        tokensBudget: 10000,
+      });
+      expect(bad.success).toBe(false);
+
+      const good = WsFrameOutboundSchema.safeParse({
+        type: 'end',
+        messageId,
+        seq: 5,
+        status: 'complete',
+        tokensUsed: 100,
+        tokensBudget: 10000,
+      });
+      expect(good.success).toBe(true);
+    });
   });
 });

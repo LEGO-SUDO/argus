@@ -123,7 +123,33 @@ export type WsTokenFrame = z.infer<typeof WsTokenFrameSchema>;
 export const WsEndStatusSchema = z.enum(['complete', 'canceled', 'failed']);
 export type WsEndStatus = z.infer<typeof WsEndStatusSchema>;
 
-export const WsEndFrameSchema = z.object({
+// chat-context-and-ux-polish (Codex review — schema-level enforcement): the
+// context fields are valid ONLY on `status: 'complete'`. HLD D5 reserves them
+// for the complete terminal; a `failed`/`canceled` end frame carrying
+// tokensUsed/tokensBudget is a contract violation, not just a runtime one.
+// Pin the constraint in the schema so a future caller can't ship them on a
+// non-complete terminal without the parse failing.
+//
+// We keep the constraint as a shared predicate so BOTH the standalone
+// `WsEndFrameSchema` AND the discriminated-union variant enforce it. (Zod 3's
+// `z.discriminatedUnion` rejects a refined object as a member — `ZodEffects`
+// has no `.shape` — so the union member stays a raw object and the union is
+// re-refined below.)
+const endContextFieldsValid = (data: {
+  status: WsEndStatus;
+  tokensUsed?: number;
+  tokensBudget?: number;
+}): boolean =>
+  data.status === 'complete' ||
+  (data.tokensUsed === undefined && data.tokensBudget === undefined);
+
+const END_CONTEXT_REFINE_OPTS: { message: string; path: (string | number)[] } = {
+  message: 'tokensUsed/tokensBudget are only valid when status is "complete"',
+  path: ['tokensUsed'],
+};
+
+// Raw object — used as the discriminated-union member (must stay a ZodObject).
+const WsEndFrameObjectSchema = z.object({
   type: z.literal('end'),
   messageId: z.string().uuid(),
   // Terminal seq — greater than every token seq emitted for this message.
@@ -136,7 +162,13 @@ export const WsEndFrameSchema = z.object({
   tokensUsed: z.number().int().nonnegative().optional(),
   tokensBudget: z.number().int().nonnegative().optional(),
 });
-export type WsEndFrame = z.infer<typeof WsEndFrameSchema>;
+
+// Standalone end-frame schema — carries the cross-field constraint.
+export const WsEndFrameSchema = WsEndFrameObjectSchema.refine(
+  endContextFieldsValid,
+  END_CONTEXT_REFINE_OPTS,
+);
+export type WsEndFrame = z.infer<typeof WsEndFrameObjectSchema>;
 
 export const WsErrorFrameSchema = z.object({
   type: z.literal('error'),
@@ -152,14 +184,22 @@ export const WsCancelAckFrameSchema = z.object({
 });
 export type WsCancelAckFrame = z.infer<typeof WsCancelAckFrameSchema>;
 
-export const WsFrameOutboundSchema = z.discriminatedUnion('type', [
-  WsStartFrameSchema,
-  WsMetadataFrameSchema,
-  WsTokenFrameSchema,
-  WsEndFrameSchema,
-  WsErrorFrameSchema,
-  WsCancelAckFrameSchema,
-]);
+export const WsFrameOutboundSchema = z
+  .discriminatedUnion('type', [
+    WsStartFrameSchema,
+    WsMetadataFrameSchema,
+    WsTokenFrameSchema,
+    WsEndFrameObjectSchema,
+    WsErrorFrameSchema,
+    WsCancelAckFrameSchema,
+  ])
+  // Re-apply the end-frame context-field constraint at the union level so a
+  // frame parsed through the outbound union (e.g. the web client) enforces it
+  // too — the union member is the raw object, which can't carry the refine.
+  .refine(
+    (frame) => frame.type !== 'end' || endContextFieldsValid(frame),
+    END_CONTEXT_REFINE_OPTS,
+  );
 export type WsFrameOutbound = z.infer<typeof WsFrameOutboundSchema>;
 
 // Union of every frame type — useful for tests and exhaustive switches.

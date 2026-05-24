@@ -187,3 +187,41 @@ describe('MessageListResponseSchema — fallback signals (Tasks 87/88)', () => {
     expect(out.success).toBe(true);
   });
 });
+
+// chat-context-and-ux-polish LLD Task 86 (Codex review #6) — the effective
+// conversation DTO travels with the messages list.
+describe('MessageListResponseSchema — conversation DTO (Task 86)', () => {
+  function baseConversation(pin: { pinnedProvider: string | null; pinnedModel: string | null }) {
+    return {
+      id: conversationId,
+      title: 't',
+      createdAt: new Date().toISOString(),
+      lastMessageAt: null,
+      pinnedProvider: pin.pinnedProvider,
+      pinnedModel: pin.pinnedModel,
+    };
+  }
+
+  it('parses with a conversation DTO carrying a set pin', () => {
+    const out = MessageListResponseSchema.safeParse({
+      conversation: baseConversation({ pinnedProvider: 'openai', pinnedModel: 'gpt-4o-mini' }),
+      messages: [baseMessage()],
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('parses with a conversation DTO carrying both pin fields null (unpinned)', () => {
+    const out = MessageListResponseSchema.safeParse({
+      conversation: baseConversation({ pinnedProvider: null, pinnedModel: null }),
+      messages: [baseMessage()],
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('still parses without the conversation key (backward compat)', () => {
+    const out = MessageListResponseSchema.safeParse({
+      messages: [baseMessage()],
+    });
+    expect(out.success).toBe(true);
+  });
+});
