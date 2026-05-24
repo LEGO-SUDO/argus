@@ -116,6 +116,9 @@ type MessageStreamProps = {
   // fall back to the composer's legacy pills. -----
   /** Provider catalog from ChatSurface's mount-time fetch. */
   providerCatalog?: ProviderCatalog;
+  /** True while ChatSurface is still fetching the catalog — drives the
+   *  picker's disabled-loading state vs the empty-state (Codex finding #6). */
+  catalogLoading?: boolean;
   /** Conversation pin (from useConversationHistory via ChatSurface). */
   pinnedProvider?: string | null;
   pinnedModel?: string | null;
@@ -130,6 +133,7 @@ export function MessageStream({
   wsClient,
   onConversationMinted,
   providerCatalog,
+  catalogLoading = false,
   pinnedProvider = null,
   pinnedModel = null,
   pinFallbackNotice,
@@ -488,11 +492,12 @@ export function MessageStream({
         onCancel={handleCancel}
         // ProviderPicker wiring (LLD Block G2/G3). `conversationId` is the
         // prop from ChatSurface (derived from the pathname); it is null on a
-        // brand-new conversation until the URL swap, at which point the
-        // picker can PATCH the minted id. Pinning before the first send is a
-        // no-op (no conversation row exists yet) — acceptable for v1.
+        // brand-new conversation until the URL swap, then flips to the minted
+        // id without remounting. The composer HOLDS a pre-send pin choice and
+        // applies it via PATCH when this id arrives (Codex finding #1).
         conversationId={conversationId}
         catalog={providerCatalog}
+        catalogLoading={catalogLoading}
         pinnedProvider={pinnedProvider}
         pinnedModel={pinnedModel}
         pinFallbackNotice={pinFallbackNotice}

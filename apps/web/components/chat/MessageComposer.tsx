@@ -67,6 +67,9 @@ type MessageComposerProps = {
   /** Provider catalog from `fetchProviderCatalog`. When present the static
    *  pills are replaced by the ProviderPicker. */
   catalog?: ProviderCatalog;
+  /** True while the catalog fetch is in flight — drives the picker's
+   *  disabled-loading state (vs the env-var empty-state). Codex finding #6. */
+  catalogLoading?: boolean;
   /** Current conversation pin (from useConversationHistory). */
   pinnedProvider?: string | null;
   /** Current conversation pin model. */
@@ -87,6 +90,7 @@ export function MessageComposer({
   onCancel,
   conversationId = null,
   catalog,
+  catalogLoading = false,
   pinnedProvider = null,
   pinnedModel = null,
   pinFallbackNotice,
@@ -101,56 +105,118 @@ export function MessageComposer({
   // ----- Optimistic pin state (LLD Tasks 125-130). -----
   // The picker reflects the local optimistic pin immediately; on PATCH
   // failure we roll back to the previous values and surface an inline error.
-  const [optimisticPin, setOptimisticPin] = useState<{
-    provider: string | null;
-    model: string | null;
-  }>({ provider: pinnedProvider, model: pinnedModel });
+  type PinPair = { provider: string | null; model: string | null };
+  const [optimisticPin, setOptimisticPin] = useState<PinPair>({
+    provider: pinnedProvider,
+    model: pinnedModel,
+  });
   // Keep the optimistic pin in sync when the upstream prop changes (e.g. a
-  // resumed conversation hydrates with a different pin). We only resync when
-  // the incoming prop pair actually differs from what we're showing so a
-  // successful optimistic update isn't clobbered by the same value.
+  // resumed conversation hydrates with a different pin). Resync on prop pair
+  // change so a successful optimistic update isn't clobbered by the same value.
   useEffect(() => {
     setOptimisticPin({ provider: pinnedProvider, model: pinnedModel });
   }, [pinnedProvider, pinnedModel]);
 
   const [pinError, setPinError] = useState<string | null>(null);
+  // PATCH-in-flight flag — disables the picker so rapid changes can't race
+  // (Codex finding #4). A request token sequences resolutions so a stale
+  // PATCH that resolves out of order can never roll back to old state.
+  const [pinBusy, setPinBusy] = useState(false);
+  const pinRequestSeq = useRef(0);
+
+  // First-turn pin (Codex finding #1). Before the conversation is minted
+  // (`conversationId === null`) there is no row to PATCH, so we HOLD the
+  // chosen pin here. When `onConversationMinted` flows the new id in via the
+  // `conversationId` prop, the effect below applies the held pin with a PATCH.
+  // `null` = nothing pending. A held pair of { null, null } means "clear was
+  // chosen pre-send" — but since a brand-new conversation defaults to Auto,
+  // an explicit pre-send clear is a no-op, so we only hold concrete pins.
+  const pendingPinRef = useRef<PinPair | null>(null);
+
+  // Apply a pin PATCH against a known conversation id with optimistic update,
+  // request sequencing, busy-gating, and rollback-on-failure. `next` is the
+  // target pin (both null → clear). `previous` is what we roll back to.
+  const applyPinPatch = useCallback(
+    (id: string, next: PinPair, previous: PinPair) => {
+      const seq = ++pinRequestSeq.current;
+      setOptimisticPin(next);
+      setPinError(null);
+      setPinBusy(true);
+      const isClear = next.provider === null || next.model === null;
+      const req = isClear
+        ? clearConversationPin(id)
+        : patchConversationPin(id, {
+            pinnedProvider: next.provider as string,
+            pinnedModel: next.model as string,
+          });
+      void req
+        .then(() => {
+          // Only the latest request may settle the busy flag (an earlier,
+          // slower PATCH resolving late must not flip busy off while a newer
+          // one is still pending).
+          if (seq === pinRequestSeq.current) setPinBusy(false);
+        })
+        .catch((err: unknown) => {
+          // Stale failure — a newer request supersedes it; ignore so we don't
+          // roll back to state the newer request already moved past.
+          if (seq !== pinRequestSeq.current) return;
+          setPinBusy(false);
+          setOptimisticPin(previous);
+          setPinError(
+            isClear
+              ? err instanceof ApiError
+                ? `Could not switch to Auto (${err.code ?? err.status}).`
+                : 'Could not switch to Auto. Please try again.'
+              : err instanceof ApiError
+                ? `Could not pin model (${err.code ?? err.status}).`
+                : 'Could not pin model. Please try again.',
+          );
+        });
+    },
+    [],
+  );
 
   const handlePin = useCallback(
     (provider: string, model: string) => {
-      if (!conversationId) return;
       const previous = optimisticPin;
-      setOptimisticPin({ provider, model });
-      setPinError(null);
-      void patchConversationPin(conversationId, {
-        pinnedProvider: provider,
-        pinnedModel: model,
-      }).catch((err: unknown) => {
-        // Roll back the optimistic pin and surface an inline notice.
-        setOptimisticPin(previous);
-        setPinError(
-          err instanceof ApiError
-            ? `Could not pin model (${err.code ?? err.status}).`
-            : 'Could not pin model. Please try again.',
-        );
-      });
+      if (!conversationId) {
+        // Pre-send: no row to PATCH yet. Reflect the choice immediately and
+        // hold it to apply once the conversation is minted (finding #1).
+        setOptimisticPin({ provider, model });
+        setPinError(null);
+        pendingPinRef.current = { provider, model };
+        return;
+      }
+      applyPinPatch(conversationId, { provider, model }, previous);
     },
-    [conversationId, optimisticPin],
+    [conversationId, optimisticPin, applyPinPatch],
   );
 
   const handleClear = useCallback(() => {
-    if (!conversationId) return;
     const previous = optimisticPin;
-    setOptimisticPin({ provider: null, model: null });
-    setPinError(null);
-    void clearConversationPin(conversationId).catch((err: unknown) => {
-      setOptimisticPin(previous);
-      setPinError(
-        err instanceof ApiError
-          ? `Could not switch to Auto (${err.code ?? err.status}).`
-          : 'Could not switch to Auto. Please try again.',
-      );
-    });
-  }, [conversationId, optimisticPin]);
+    if (!conversationId) {
+      // Pre-send clear → back to Auto locally; cancel any held pin.
+      setOptimisticPin({ provider: null, model: null });
+      setPinError(null);
+      pendingPinRef.current = null;
+      return;
+    }
+    applyPinPatch(conversationId, { provider: null, model: null }, previous);
+  }, [conversationId, optimisticPin, applyPinPatch]);
+
+  // Apply a held pre-send pin once the conversation id arrives (finding #1).
+  useEffect(() => {
+    if (!conversationId) return;
+    const pending = pendingPinRef.current;
+    if (!pending || pending.provider === null || pending.model === null) return;
+    pendingPinRef.current = null;
+    // Roll back target is Auto (a freshly-minted conversation has no pin).
+    applyPinPatch(
+      conversationId,
+      pending,
+      { provider: null, model: null },
+    );
+  }, [conversationId, applyPinPatch]);
 
   // ----- Inline pin-fallback notice dismissal (LLD Tasks 132-139). -----
   // The notice is sourced from the prop (cache-backed); dismissal calls the
@@ -292,6 +358,8 @@ export function MessageComposer({
                 onPin={handlePin}
                 onClear={handleClear}
                 streaming={streaming}
+                loading={catalogLoading}
+                busy={pinBusy}
               />
             ) : (
               // Legacy static pills — kept for call sites that don't yet pass

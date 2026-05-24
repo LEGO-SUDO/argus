@@ -221,3 +221,100 @@ describe('ProviderPicker — empty state', () => {
     expect(screen.queryByRole('listbox')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex finding #6 — loading vs empty-configured. While the catalog fetch is
+// in flight the picker shows a disabled "Loading models…" state, NOT the
+// env-var empty-state copy (which only applies once the fetch resolves with
+// zero providers).
+// ---------------------------------------------------------------------------
+describe('ProviderPicker — loading state', () => {
+  it('shows "Loading models…" (not the env-var copy) while loading, even with an empty catalog', async () => {
+    renderPicker({ catalog: EMPTY_CATALOG, loading: true });
+    const trigger = screen.getByRole('combobox');
+    expect(trigger).toHaveTextContent('Loading models…');
+    expect(trigger).not.toHaveTextContent(/No providers configured/i);
+    expect(trigger).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(trigger);
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex finding #4 — optimistic PATCH race. While a pin PATCH is in flight the
+// trigger is genuinely disabled so a second racing PATCH can't be fired.
+// ---------------------------------------------------------------------------
+describe('ProviderPicker — busy (PATCH in flight)', () => {
+  it('disables the trigger and refuses to open while busy', async () => {
+    renderPicker({ busy: true });
+    const trigger = screen.getByRole('combobox');
+    expect(trigger).toBeDisabled();
+    expect(trigger).toHaveAttribute('aria-busy', 'true');
+    await userEvent.click(trigger);
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex finding #3 — duplicate listbox ids. Two pickers on one page must not
+// share an id (useId gives each instance a unique one).
+// ---------------------------------------------------------------------------
+describe('ProviderPicker — unique listbox ids (useId)', () => {
+  it('gives two instances distinct aria-controls / listbox ids', () => {
+    render(
+      <div>
+        <ProviderPicker
+          catalog={CATALOG}
+          pinnedProvider={null}
+          pinnedModel={null}
+          onPin={noop}
+          onClear={noop}
+          streaming={false}
+        />
+        <ProviderPicker
+          catalog={CATALOG}
+          pinnedProvider={null}
+          pinnedModel={null}
+          onPin={noop}
+          onClear={noop}
+          streaming={false}
+        />
+      </div>,
+    );
+    const triggers = screen.getAllByRole('combobox');
+    expect(triggers).toHaveLength(2);
+    const a = triggers[0]!.getAttribute('aria-controls');
+    const b = triggers[1]!.getAttribute('aria-controls');
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(a).not.toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex finding #5 — combobox a11y. When open, aria-activedescendant points
+// at the active option (which carries a matching id), per the WAI-ARIA
+// combobox pattern.
+// ---------------------------------------------------------------------------
+describe('ProviderPicker — aria-activedescendant', () => {
+  it('points aria-activedescendant at the focused option id when open', async () => {
+    renderPicker();
+    const trigger = screen.getByRole('combobox');
+    trigger.focus();
+    await userEvent.keyboard('{ArrowDown}'); // open, focus option 0
+    const activeId = trigger.getAttribute('aria-activedescendant');
+    expect(activeId).toBeTruthy();
+    const options = screen.getAllByRole('option');
+    expect(options[0]!.id).toBe(activeId);
+    // Move down — activedescendant tracks the new active option.
+    await userEvent.keyboard('{ArrowDown}');
+    expect(trigger.getAttribute('aria-activedescendant')).toBe(options[1]!.id);
+  });
+
+  it('has no aria-activedescendant while closed', () => {
+    renderPicker();
+    expect(
+      screen.getByRole('combobox').getAttribute('aria-activedescendant'),
+    ).toBeNull();
+  });
+});

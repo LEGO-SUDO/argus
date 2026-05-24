@@ -29,6 +29,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -40,6 +41,8 @@ import type { ProviderCatalog, ProviderCatalogEntry } from '@/lib/providers-api'
 const EMPTY_STATE_LABEL =
   'No providers configured — set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in .env.';
 
+const LOADING_LABEL = 'Loading models…';
+
 type ProviderPickerProps = {
   catalog: ProviderCatalog;
   pinnedProvider: string | null;
@@ -47,6 +50,19 @@ type ProviderPickerProps = {
   onPin: (provider: string, model: string) => void;
   onClear: () => void;
   streaming: boolean;
+  /**
+   * True while the catalog is still being fetched. Distinguishes the
+   * disabled-loading state ("Loading models…") from the env-var empty-state
+   * ("No providers configured…") that only applies after a fetch resolves
+   * with zero providers (Codex finding #6).
+   */
+  loading?: boolean;
+  /**
+   * True while a pin PATCH is in flight. The trigger is genuinely disabled so
+   * the user can't fire a second, racing PATCH before the first resolves
+   * (Codex finding #4 — optimistic PATCH race).
+   */
+  busy?: boolean;
 };
 
 // A flat option model — one entry per catalog row, plus an optional synthetic
@@ -62,6 +78,8 @@ export function ProviderPicker({
   onPin,
   onClear,
   streaming,
+  loading = false,
+  busy = false,
 }: ProviderPickerProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -70,11 +88,21 @@ export function ProviderPicker({
   const listboxRef = useRef<HTMLUListElement | null>(null);
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  // Stable id linking the trigger (aria-controls) to the listbox panel.
-  const listboxId = 'provider-picker-listbox';
+  // Stable, INSTANCE-UNIQUE id linking the trigger (aria-controls) to the
+  // listbox panel and seeding each option's id (Codex finding #3 — multiple
+  // pickers on a page must not collide on a hardcoded listbox id).
+  const reactId = useId();
+  const listboxId = `provider-picker-listbox-${reactId}`;
+  const optionId = useCallback(
+    (index: number) => `${listboxId}-option-${index}`,
+    [listboxId],
+  );
 
   const isEmpty = catalog.providers.length === 0;
-  const isDisabled = streaming || isEmpty;
+  // Disabled when streaming, while a PATCH is in flight, while loading, or
+  // when the (resolved) catalog is empty. `loading` and `busy` are TRUE
+  // disabled states — the trigger does not open.
+  const isDisabled = streaming || busy || loading || isEmpty;
 
   // Is the pinned (provider, model) pair actually present in the catalog?
   const pinIsValid = useMemo(() => {
@@ -84,12 +112,17 @@ export function ProviderPicker({
     );
   }, [catalog.providers, pinnedProvider, pinnedModel]);
 
-  // Trigger label. Empty-state copy wins; then a valid pin; else Auto.
-  const triggerLabel = isEmpty
-    ? EMPTY_STATE_LABEL
-    : pinIsValid
-      ? `${pinnedProvider} · ${pinnedModel}`
-      : 'Auto';
+  // Trigger label. Loading copy wins first (a fetch is in flight, so we don't
+  // yet know whether the catalog is empty); then the env-var empty-state copy
+  // (only meaningful AFTER the fetch resolved with zero providers); then a
+  // valid pin; else Auto. (Codex finding #6 — no empty-state flash mid-fetch.)
+  const triggerLabel = loading
+    ? LOADING_LABEL
+    : isEmpty
+      ? EMPTY_STATE_LABEL
+      : pinIsValid
+        ? `${pinnedProvider} · ${pinnedModel}`
+        : 'Auto';
 
   // Grouped catalog for rendering (provider → its model rows). Stable order
   // follows first-appearance in the catalog array.
@@ -200,12 +233,26 @@ export function ProviderPicker({
         aria-haspopup="listbox"
         aria-controls={listboxId}
         aria-expanded={open}
+        // `disabled` is the real, behavior-backed control — a disabled
+        // <button> can't be clicked, focused-via-tab, or keyboard-activated,
+        // so the aria-disabled/no-op-handler split is gone (Codex finding #5).
+        // We mirror it onto aria-disabled for AT that read the ARIA layer.
+        disabled={isDisabled}
         aria-disabled={isDisabled || undefined}
+        // WAI-ARIA combobox: when the listbox is open, point at the active
+        // option so AT announces the focused row without moving DOM focus off
+        // the combobox conceptually (Codex finding #5).
+        aria-activedescendant={
+          open && !isDisabled ? optionId(activeIndex) : undefined
+        }
         // Explicit accessible name so screen readers (and the accessible-name
         // computation) get a stable label regardless of the nested span/SVG
         // structure. Mirrors the visible label.
         aria-label={triggerLabel}
+        aria-busy={busy || loading || undefined}
         data-testid="provider-picker-trigger"
+        data-loading={loading ? 'true' : undefined}
+        data-busy={busy ? 'true' : undefined}
         onClick={() => (open ? setOpen(false) : openDropdown())}
         onKeyDown={onTriggerKeyDown}
         className={
@@ -214,7 +261,7 @@ export function ProviderPicker({
         }
       >
         <span className="truncate">{triggerLabel}</span>
-        {!isEmpty ? (
+        {!isEmpty && !loading ? (
           <svg
             width="9"
             height="9"
@@ -251,6 +298,7 @@ export function ProviderPicker({
                 return (
                   <li
                     key="__auto"
+                    id={optionId(idx)}
                     ref={(el) => {
                       optionRefs.current[idx] = el;
                     }}
@@ -286,6 +334,7 @@ export function ProviderPicker({
                   return (
                     <li
                       key={`${entry.provider}/${entry.model}`}
+                      id={optionId(idx)}
                       ref={(el) => {
                         optionRefs.current[idx] = el;
                       }}

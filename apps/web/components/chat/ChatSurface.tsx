@@ -126,12 +126,19 @@ export function ChatSurface() {
     };
   }, []);
 
-  // The catalog handed to MessageComposer. On error we pass an empty catalog
-  // so the picker renders its disabled empty-state branch.
+  // The catalog handed to MessageComposer. On error/loading we pass an empty
+  // catalog; the picker distinguishes the two via `catalogLoading` so the
+  // env-var empty-state copy only shows AFTER a fetch resolves with zero
+  // providers (Codex finding #6 — no empty-state flash mid-fetch).
   const composerCatalog: ProviderCatalog =
     catalogState.status === 'ready'
       ? catalogState.catalog
       : { providers: [] };
+  // Loading covers both the initial `idle` (effect hasn't set `loading` yet on
+  // first render) and the in-flight `loading` state, so the picker never
+  // flashes "No providers configured" before the fetch settles.
+  const catalogLoading =
+    catalogState.status === 'idle' || catalogState.status === 'loading';
 
   // Callback handed to MessageStream — invoked when the WS start frame
   // hands us a freshly-minted conversation id. We mark the id as
@@ -213,6 +220,7 @@ export function ChatSurface() {
         omittedCount={omittedCount}
         onConversationMinted={handleConversationMinted}
         providerCatalog={composerCatalog}
+        catalogLoading={catalogLoading}
         pinnedProvider={pinnedProvider}
         pinnedModel={pinnedModel}
         pinFallbackNotice={pinFallbackNotice}
