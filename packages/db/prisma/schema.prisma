@@ -88,6 +88,12 @@ model Conversation {
   title         String
   createdAt     DateTime  @default(now()) @map("created_at")
   lastMessageAt DateTime? @map("last_message_at")
+  // chat-context-and-ux-polish LLD Task 35 — picker pin columns. Both
+  // nullable; the application-level coupling rule (UpdateConversationRequest
+  // schema in @argus/contracts) ensures they move together. camelCase on
+  // the model with @map to snake_case columns per the existing convention.
+  pinnedProvider String? @map("pinned_provider")
+  pinnedModel    String? @map("pinned_model")
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages Message[]
