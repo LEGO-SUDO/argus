@@ -150,7 +150,9 @@ describe('MessageComposer', () => {
     const input = screen.getByTestId('message-composer-input') as HTMLTextAreaElement;
     await userEvent.type(input, 'hello');
     await userEvent.keyboard('{Enter}');
-    expect(onSend).toHaveBeenCalledWith('hello');
+    // onSend now takes an optional pin arg (FIX 7); with no catalog/pin it is
+    // undefined.
+    expect(onSend).toHaveBeenCalledWith('hello', undefined);
     expect(input.value).toBe('');
 
     await userEvent.type(input, 'first');
@@ -251,7 +253,13 @@ describe('MessageComposer — pin set/clear with a conversation id', () => {
     });
   });
 
-  it('does NOT PATCH pre-send (null conversationId) — holds the pin locally then applies on mint', async () => {
+  // Design review FIX 7: the pre-send pin is NO LONGER PATCHed after the
+  // conversation mints. It is carried on the WS `send` frame (handled by
+  // MessageStream — see that suite) and persisted by the gateway. So the
+  // composer must NOT fire a PATCH pre-send NOR a post-mint catch-up PATCH for
+  // the pre-send-pin path (that old PATCH raced the first turn and is now
+  // redundant). It only reflects the choice locally and hands it to `onSend`.
+  it('does NOT PATCH pre-send and does NOT PATCH on mint for the pre-send pin (FIX 7)', async () => {
     const { rerender } = render(
       <MessageComposer
         disabled={false}
@@ -283,13 +291,65 @@ describe('MessageComposer — pin set/clear with a conversation id', () => {
       );
       await Promise.resolve();
     });
-    // The held pin is now applied with a PATCH carrying the minted id.
-    await waitFor(() => {
-      expect(patchPinMock).toHaveBeenCalledWith(CONV_ID, {
-        pinnedProvider: 'openai',
-        pinnedModel: 'gpt-4o-mini',
-      });
+    // Still NO PATCH — the gateway persisted the pin from the send frame, so a
+    // post-mint catch-up PATCH would be redundant (and used to race turn 1).
+    await Promise.resolve();
+    expect(patchPinMock).not.toHaveBeenCalled();
+  });
+
+  // FIX 7 (composer half): `submit` carries the pre-send pin to `onSend` so
+  // MessageStream can put it on the WS frame. Auto carries nothing.
+  it('passes the pre-send pin to onSend on a new conversation, omits it for Auto', async () => {
+    const onSend = jest.fn();
+    const { rerender } = render(
+      <MessageComposer
+        disabled={false}
+        onSend={onSend}
+        conversationId={null}
+        catalog={CATALOG}
+      />,
+    );
+    // Pin a model, then send → onSend receives the complete pin pair.
+    await userEvent.click(screen.getByTestId('provider-picker-trigger'));
+    await userEvent.click(screen.getByRole('option', { name: /gpt-4o-mini/i }));
+    await userEvent.type(
+      screen.getByTestId('message-composer-input'),
+      'pinned turn',
+    );
+    await userEvent.click(screen.getByTestId('message-composer-send'));
+    expect(onSend).toHaveBeenLastCalledWith('pinned turn', {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
     });
+
+    // Switch back to Auto, then send → onSend receives no pin (undefined).
+    await userEvent.click(screen.getByTestId('provider-picker-trigger'));
+    await userEvent.click(screen.getByRole('option', { name: /^auto$/i }));
+    await userEvent.type(
+      screen.getByTestId('message-composer-input'),
+      'auto turn',
+    );
+    await userEvent.click(screen.getByTestId('message-composer-send'));
+    expect(onSend).toHaveBeenLastCalledWith('auto turn', undefined);
+
+    // Sanity: an EXISTING conversation never carries the pin on the frame
+    // (pin changes go via PATCH there). Rerender with an id + pin and send.
+    rerender(
+      <MessageComposer
+        disabled={false}
+        onSend={onSend}
+        conversationId={CONV_ID}
+        catalog={CATALOG}
+        pinnedProvider="openai"
+        pinnedModel="gpt-4o-mini"
+      />,
+    );
+    await userEvent.type(
+      screen.getByTestId('message-composer-input'),
+      'existing convo',
+    );
+    await userEvent.click(screen.getByTestId('message-composer-send'));
+    expect(onSend).toHaveBeenLastCalledWith('existing convo', undefined);
   });
 });
 

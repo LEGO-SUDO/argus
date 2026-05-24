@@ -313,18 +313,31 @@ export function MessageStream({
   // stuck. The user message is still appended in the success path so the
   // optimistic UI is responsive.
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, pin?: { provider: string; model: string }) => {
       if (!client) return;
       // Clear any stale connection banner — the user is taking a new action.
       // If the send below throws because the socket really is dead, we re-set
       // wsError in the catch branch with the actual reason.
       setWsError(null);
       const userMessageId = uuidv4Safe();
+      // First-turn pin (FIX 7): on a brand-new conversation (no id yet), carry
+      // the chosen pin on the `send` frame so the gateway honors it for THIS
+      // turn and persists it onto the freshly-minted row — closing the race
+      // where the old post-mint PATCH landed after the turn already streamed
+      // Auto. We send BOTH fields as non-empty strings or NEITHER (never null,
+      // never one): the contract rejects asymmetric/empty/null pins. For an
+      // existing conversation the pin lives on the row already (set via PATCH),
+      // so we omit it here.
+      const carryPin =
+        liveConvIdRef.current === null && pin ? pin : undefined;
       try {
         client.send({
           type: 'send',
           conversationId: liveConvIdRef.current,
           content: text,
+          ...(carryPin
+            ? { pinnedProvider: carryPin.provider, pinnedModel: carryPin.model }
+            : {}),
         });
       } catch (err) {
         // Surface to the user without locking the composer. We also do NOT
@@ -506,8 +519,10 @@ export function MessageStream({
         // ProviderPicker wiring (LLD Block G2/G3). `conversationId` is the
         // prop from ChatSurface (derived from the pathname); it is null on a
         // brand-new conversation until the URL swap, then flips to the minted
-        // id without remounting. The composer HOLDS a pre-send pin choice and
-        // applies it via PATCH when this id arrives (Codex finding #1).
+        // id without remounting. On a new conversation the composer carries its
+        // pre-send pin choice on the `send` frame via `onSend(text, pin)` (the
+        // gateway persists it) — design review FIX 7; the old post-mint PATCH
+        // for that path is gone. In-conversation pin changes still go via PATCH.
         conversationId={conversationId}
         catalog={providerCatalog}
         catalogLoading={catalogLoading}

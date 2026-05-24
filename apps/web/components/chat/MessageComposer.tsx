@@ -55,7 +55,16 @@ type MessageComposerProps = {
    *  pill chip — only rendered when no `catalog` prop is supplied (i.e. the
    *  pre-ProviderPicker call shape). Defaults to 1. */
   providersConfigured?: number;
-  onSend: (text: string) => void;
+  /**
+   * Submit the message. On the FIRST turn of a brand-new conversation
+   * (`conversationId === null`) the composer also passes the currently-chosen
+   * pin so the host can carry it on the WS `send` frame — the gateway then
+   * persists it for the freshly-minted conversation (design review FIX 7).
+   * `pin` is undefined for Auto or for any turn on an existing conversation
+   * (where pin changes go via PATCH instead). It is only ever a complete pair
+   * (both provider + model non-empty) — never a partial/null pin.
+   */
+  onSend: (text: string, pin?: { provider: string; model: string }) => void;
   onCancel?: () => void;
 
   // ----- ProviderPicker wiring (LLD Block G2/G3). All optional so legacy
@@ -124,14 +133,15 @@ export function MessageComposer({
   const [pinBusy, setPinBusy] = useState(false);
   const pinRequestSeq = useRef(0);
 
-  // First-turn pin (Codex finding #1). Before the conversation is minted
-  // (`conversationId === null`) there is no row to PATCH, so we HOLD the
-  // chosen pin here. When `onConversationMinted` flows the new id in via the
-  // `conversationId` prop, the effect below applies the held pin with a PATCH.
-  // `null` = nothing pending. A held pair of { null, null } means "clear was
-  // chosen pre-send" — but since a brand-new conversation defaults to Auto,
-  // an explicit pre-send clear is a no-op, so we only hold concrete pins.
-  const pendingPinRef = useRef<PinPair | null>(null);
+  // First-turn pin (Codex finding #1 → design review FIX 7). Before the
+  // conversation is minted (`conversationId === null`) there is no row to
+  // PATCH, so the chosen pin is simply reflected in `optimisticPin`. On submit
+  // the composer hands that pin to `onSend`, which carries it on the WS `send`
+  // frame; the gateway honors it for the first turn AND persists it onto the
+  // freshly-minted conversation row. So the OLD post-mint PATCH for the
+  // pre-send-pin path is gone — it raced the first turn (the gateway had
+  // already streamed with Auto by the time the PATCH landed) and is now
+  // redundant. In-conversation pin changes still go via PATCH below.
 
   // Apply a pin PATCH against a known conversation id with optimistic update,
   // request sequencing, busy-gating, and rollback-on-failure. `next` is the
@@ -180,11 +190,10 @@ export function MessageComposer({
     (provider: string, model: string) => {
       const previous = optimisticPin;
       if (!conversationId) {
-        // Pre-send: no row to PATCH yet. Reflect the choice immediately and
-        // hold it to apply once the conversation is minted (finding #1).
+        // Pre-send: no row to PATCH yet. Reflect the choice immediately; it
+        // is carried on the next `send` frame (FIX 7), not PATCHed.
         setOptimisticPin({ provider, model });
         setPinError(null);
-        pendingPinRef.current = { provider, model };
         return;
       }
       applyPinPatch(conversationId, { provider, model }, previous);
@@ -195,28 +204,14 @@ export function MessageComposer({
   const handleClear = useCallback(() => {
     const previous = optimisticPin;
     if (!conversationId) {
-      // Pre-send clear → back to Auto locally; cancel any held pin.
+      // Pre-send clear → back to Auto locally; the next send simply omits the
+      // pin (Auto), so there's nothing to cancel/PATCH.
       setOptimisticPin({ provider: null, model: null });
       setPinError(null);
-      pendingPinRef.current = null;
       return;
     }
     applyPinPatch(conversationId, { provider: null, model: null }, previous);
   }, [conversationId, optimisticPin, applyPinPatch]);
-
-  // Apply a held pre-send pin once the conversation id arrives (finding #1).
-  useEffect(() => {
-    if (!conversationId) return;
-    const pending = pendingPinRef.current;
-    if (!pending || pending.provider === null || pending.model === null) return;
-    pendingPinRef.current = null;
-    // Roll back target is Auto (a freshly-minted conversation has no pin).
-    applyPinPatch(
-      conversationId,
-      pending,
-      { provider: null, model: null },
-    );
-  }, [conversationId, applyPinPatch]);
 
   // ----- Inline pin-fallback notice dismissal (LLD Tasks 132-139). -----
   // The notice is sourced from the prop (cache-backed); dismissal calls the
@@ -256,9 +251,20 @@ export function MessageComposer({
   const submit = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || disabled) return;
-    onSend(trimmed);
+    // First-turn pin (FIX 7): on a brand-new conversation (no id yet) carry
+    // the chosen pin on the send so the gateway honors it for THIS turn and
+    // persists it onto the freshly-minted row. Only a complete pair is sent;
+    // Auto (no pin) sends nothing. For an EXISTING conversation, pin changes
+    // already went via PATCH, so we don't carry it here.
+    const carryPin =
+      conversationId === null &&
+      optimisticPin.provider !== null &&
+      optimisticPin.model !== null
+        ? { provider: optimisticPin.provider, model: optimisticPin.model }
+        : undefined;
+    onSend(trimmed, carryPin);
     setText('');
-  }, [disabled, onSend, text]);
+  }, [conversationId, disabled, onSend, optimisticPin, text]);
 
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
