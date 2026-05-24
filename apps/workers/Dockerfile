@@ -44,8 +44,13 @@ COPY packages/contracts packages/contracts
 COPY packages/db packages/db
 COPY packages/sdk packages/sdk
 
-# Generate Prisma client + compile TS.
+# Generate Prisma client, build workspace packages, then build workers.
+# Packages must be built first because per-app tsconfigs override paths to
+# {} — tsc resolves @argus/* via node_modules → package.json main → dist/.
 RUN pnpm --filter @argus/db exec prisma generate
+RUN pnpm --filter @argus/contracts build
+RUN pnpm --filter @argus/sdk build
+RUN pnpm --filter @argus/db build
 RUN pnpm --filter @argus/workers build
 
 # -----------------------------------------------------------------------------
@@ -71,4 +76,4 @@ COPY --from=builder /app/packages/sdk/node_modules ./packages/sdk/node_modules
 EXPOSE 3002
 # tini for proper PID-1 signal forwarding so SIGTERM reaches Node.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "apps/workers/dist/apps/workers/src/main.js"]
+CMD ["node", "apps/workers/dist/main.js"]

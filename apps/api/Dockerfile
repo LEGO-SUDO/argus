@@ -75,4 +75,4 @@ ENTRYPOINT ["/sbin/tini", "--"]
 # Run Prisma migrations against the freshly-booted Postgres BEFORE starting
 # the Nest app. `--schema` points at the schema in the db package; the
 # `migrate deploy` command is idempotent so repeated boots are safe.
-CMD ["sh", "-c", "packages/db/node_modules/.bin/prisma migrate deploy --schema packages/db/prisma/schema.prisma && node apps/api/dist/apps/api/src/main.js"]
+CMD ["sh", "-c", "packages/db/node_modules/.bin/prisma migrate deploy --schema packages/db/prisma/schema.prisma && node apps/api/dist/main.js"]
