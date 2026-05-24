@@ -1,0 +1,74 @@
+# ============================================================================
+# OTel Collector config.
+#
+# Receives OTLP spans from the SDK / api / workers and fans out to:
+#   1. Redpanda — the `traces` topic our projection consumer reads
+#   2. Jaeger   — UI for trace deep-dives (Phase B Traces tab will link here)
+#
+# Partition-key strategy (HLD D1): all spans for one chat turn must land on
+# the same Redpanda partition so the consumer processes them in order. We
+# use the `partition_traces_by_id` flag — kafka exporter ships every span in
+# a given trace to the same partition. Since the SDK starts ONE trace per
+# chat turn and tags it with the message_id attribute, "same trace" ==
+# "same message".
+#
+# Encoding: Phase A uses otlp_json on the wire so the projection consumer
+# can `JSON.parse` records directly (also lets hand-fabricated smoke records
+# work via `rpk topic produce`). Proto would be smaller on the wire but
+# requires pulling in `@opentelemetry/otlp-transformer`'s request
+# deserializer in the consumer — defer to Phase B for production wire-size
+# realism. See apps/workers/src/projection/projection.consumer.ts header.
+#
+# Health endpoint at :13133 (used by compose healthcheck).
+# ============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 200ms
+    send_batch_size: 512
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+exporters:
+  # ---- Redpanda (Kafka API) ----
+  kafka:
+    brokers:
+      - redpanda:9092
+    topic: traces
+    encoding: otlp_json
+    # Pin partition per trace so all spans for one chat turn (one trace_id)
+    # arrive on the same partition in order. The consumer dedupes via the
+    # (trace_id, span_id) unique index regardless, but in-order delivery
+    # simplifies projection-write ordering for failover-attempt rows.
+    partition_traces_by_id: true
+    producer:
+      compression: snappy
+      max_message_bytes: 1048576 # 1 MiB; payload cap is enforced in SDK + consumer.
+      required_acks: 1
+
+  # ---- Jaeger (OTLP gRPC) ----
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [kafka, otlp/jaeger]
+  telemetry:
+    logs:
+      level: info

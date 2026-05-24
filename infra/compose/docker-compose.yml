@@ -1,0 +1,252 @@
+# ============================================================================
+# Argus Chatbot — Phase A compose topology (HLD D7).
+#
+# Seven long-running services + one short-lived bootstrap:
+#   web              Next.js chat surface
+#   api              NestJS REST + WS gateway
+#   workers          Redpanda projection consumer (this LLD)
+#   postgres         chat state source of truth
+#   redpanda         Kafka-API bus
+#   redpanda-bootstrap   one-shot: creates `traces` topic on first boot
+#   otel-collector   OTLP receiver fanning out to Redpanda + Jaeger
+#   jaeger           trace-detail UI
+#
+# Redis is intentionally absent in Phase A (BullMQ is Phase B). Adding an
+# idle required service expands the boot-failure surface without value.
+#
+# Boot order via depends_on / service_healthy:
+#   redpanda-bootstrap waits on redpanda (must be healthy before topic create)
+#   otel-collector     waits on redpanda-bootstrap (topic must exist)
+#   api                waits on postgres (Prisma migrate on boot)
+#   workers            waits on postgres + redpanda-bootstrap
+#   web                waits on api
+# ============================================================================
+
+name: argus
+
+networks:
+  argus-net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redpanda_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: argus-postgres
+    restart: unless-stopped
+    networks: [argus-net]
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus
+      POSTGRES_DB: argus
+      # Keep checkpoint noise down for local dev.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    # Host-bound so local `pnpm dev` (hybrid mode) can reach Postgres at
+    # localhost:5432. Safe to keep open in dev; remove in any internet-facing
+    # deploy.
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus -d argus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  redpanda:
+    image: redpandadata/redpanda:v24.2.13
+    container_name: argus-redpanda
+    restart: unless-stopped
+    networks: [argus-net]
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    # Host-bound so local workers (hybrid mode) can produce/consume via
+    # localhost:9092. Admin API exposed on 9644 for `rpk` debugging.
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 --exit-when-healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # One-shot: creates the `traces` topic, then exits 0. Other services that
+  # need the topic to exist (otel-collector, workers) wait for this to
+  # complete via depends_on / service_completed_successfully.
+  redpanda-bootstrap:
+    build:
+      context: ../redpanda
+      dockerfile: Dockerfile.bootstrap
+    container_name: argus-redpanda-bootstrap
+    networks: [argus-net]
+    environment:
+      REDPANDA_BROKER: redpanda:9092
+      REDPANDA_TRACES_TOPIC: traces
+      REDPANDA_TRACES_PARTITIONS: "6"
+      REDPANDA_TRACES_REPLICAS: "1"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: argus-otel-collector
+    restart: unless-stopped
+    networks: [argus-net]
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ../otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC (host-bound for SDK in dev)
+      - "4318:4318" # OTLP HTTP
+      - "13133:13133" # health
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:13133/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: argus-jaeger
+    restart: unless-stopped
+    networks: [argus-net]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI (host-bound)
+      # OTLP receivers on the same default ports as the collector are
+      # network-internal — they don't collide because they're in their own
+      # container network namespace.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:14269/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    container_name: argus-api
+    restart: unless-stopped
+    networks: [argus-net]
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgresql://argus:argus@postgres:5432/argus?schema=public
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      MOCK_PROVIDER: "${MOCK_PROVIDER:-true}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      # Fail-fast: compose refuses to render the api service if SESSION_SECRET
+      # is unset. The .env.example ships this as empty so a fresh checkout
+      # produces a loud "SESSION_SECRET must be set" error rather than silently
+      # booting prod with a known default.
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET must be set — generate one with `openssl rand -hex 32`}"
+      CONTEXT_MAX_TOKENS: "${CONTEXT_MAX_TOKENS:-6000}"
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:4000/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  workers:
+    build:
+      context: ../..
+      dockerfile: apps/workers/Dockerfile
+    container_name: argus-workers
+    restart: unless-stopped
+    networks: [argus-net]
+    environment:
+      NODE_ENV: production
+      PORT: "3002"
+      DATABASE_URL: postgresql://argus:argus@postgres:5432/argus?schema=public
+      REDPANDA_BROKERS: redpanda:9092
+      REDPANDA_TRACES_TOPIC: traces
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3002/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+    container_name: argus-web
+    restart: unless-stopped
+    networks: [argus-net]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Server-side fetch + Next rewrites: reach the api over the compose
+      # network. The web container can't talk to localhost:4000 (that's its
+      # own loopback) — it needs the compose service name.
+      INTERNAL_API_URL: http://api:4000
+      # Browser-side WebSocket: direct host-bound URL the user's browser
+      # can reach. WS doesn't go through Next rewrites.
+      NEXT_PUBLIC_WS_URL: ws://localhost:4000/ws/chat
+      # Browser-side REST: empty so client code uses relative /api/* paths
+      # which Next rewrites proxy via INTERNAL_API_URL above.
+      NEXT_PUBLIC_API_URL: ""
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
