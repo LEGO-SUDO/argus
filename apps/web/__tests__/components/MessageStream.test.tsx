@@ -106,8 +106,6 @@ describe('MessageStream — cancel button visibility', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({ type: 'token', messageId: MSG_ID, seq: 1, content: 'hi' });
@@ -131,8 +129,6 @@ describe('MessageStream — cancel click sends cancel frame', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     await userEvent.click(screen.getByRole('button', { name: /cancel/i }));
@@ -158,8 +154,6 @@ describe('MessageStream — retry on failed turn', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({
@@ -200,8 +194,6 @@ describe('MessageStream — retry on failed turn', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({
@@ -242,8 +234,6 @@ describe('MessageStream — composer disabled while streaming', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(input).toBeDisabled();
@@ -317,25 +307,19 @@ describe('MessageStream — provider/model label', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'openai',
-      model: 'gpt-4',
       seq: 0,
     });
     // Metadata frame (post-commit) is the SOLE source of provider/model per
-    // HLD D1 + LLD Tasks 1-4. The start frame's provider/model are ignored
-    // by the reducer — emit a metadata frame so the chip and promoted
-    // message acquire the strings.
-    //
-    // Cast through `unknown` because `WsFrameOutbound` from
-    // `@argus/contracts` doesn't yet declare the metadata variant on this
-    // branch (backend worker owns that addition); the reducer accepts a
-    // widened `StreamFrame` internally.
+    // HLD D1 + LLD Tasks 1-4. The start frame is identity-only; emit a
+    // metadata frame so the chip and promoted message acquire the strings.
+    // `WsMetadataFrame` is a member of `WsFrameOutbound` in the real
+    // contract, so no cast is needed.
     stub.fire({
       type: 'metadata',
       messageId: MSG_ID,
       seq: 1,
       providerMeta: { provider: 'openai', model: 'gpt-4' },
-    } as unknown as WsFrameOutbound);
+    });
     stub.fire({ type: 'token', messageId: MSG_ID, seq: 2, content: 'ok' });
     stub.fire({ type: 'end', messageId: MSG_ID, seq: 3, status: 'complete' });
     // Both strings appear in the rendered tree.
@@ -460,8 +444,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(replaceMock).toHaveBeenCalledWith(`/chat/${NEW_CONV_ID}`);
@@ -484,8 +466,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(onMinted).toHaveBeenCalledWith(NEW_CONV_ID);
@@ -522,8 +502,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
 

@@ -22,14 +22,9 @@
 //     through to messages.
 //
 // The reducer is pure and React-free — these tests import the module directly
-// without rendering any component.
-//
-// FIXTURE BOUNDARY: the metadata-frame TypeScript shape lives in this file
-// only — the backend worker owns the canonical zod schema in
-// @argus/contracts. The shape below mirrors the LLD "Locked Contracts"
-// section verbatim so the reducer tests pin the agreed wire shape. Once the
-// branches merge, `MetadataFrameFixture` should be replaced with a direct
-// import of the contracts-side type and this comment removed.
+// without rendering any component. The metadata frame fixture uses the real
+// `WsMetadataFrame` type from `@argus/contracts` (the merge is done — the
+// contract is ground truth).
 import {
   reducer,
   initialState,
@@ -39,6 +34,7 @@ import {
 import type {
   WsEndFrame,
   WsErrorFrame,
+  WsMetadataFrame,
   WsStartFrame,
   WsTokenFrame,
 } from '@argus/contracts';
@@ -46,27 +42,11 @@ import type {
 const MSG_ID = '11111111-1111-4111-8111-111111111111';
 const CONV_ID = '22222222-2222-4222-8222-222222222222';
 
-// Test-side mirror of the metadata frame shape locked in the LLD. The
-// reducer's `Action` union accepts this via the same `frame` envelope
-// (cast at the dispatch site) so we stay forward-compatible with the
-// contracts type that lands in the same backbone PR.
-type MetadataFrameFixture = {
-  type: 'metadata';
-  messageId: string;
-  seq: number;
-  providerMeta: {
-    provider: string;
-    model: string;
-    // Open-shaped per HLD D1 — extra fields are allowed and ignored.
-    [k: string]: unknown;
-  };
-};
-
 function makeMetadata(
   provider: string,
   model: string,
-  overrides: Partial<MetadataFrameFixture> = {},
-): MetadataFrameFixture {
+  overrides: Partial<WsMetadataFrame> = {},
+): WsMetadataFrame {
   return {
     type: 'metadata',
     messageId: MSG_ID,
@@ -77,16 +57,12 @@ function makeMetadata(
 }
 
 function makeStart(overrides: Partial<WsStartFrame> = {}): WsStartFrame {
+  // Identity-only per the contract — no provider/model. The reducer opens a
+  // provisional bubble and the metadata frame fills provider/model later.
   return {
     type: 'start',
     messageId: MSG_ID,
     conversationId: CONV_ID,
-    // NOTE: legacy fixture continues to carry provider/model so the existing
-    // start-frame schema (WsStartFrameSchema) still type-checks. The reducer
-    // no longer READS these — see Task 3-4. The eventual contracts update
-    // will drop these from the start schema entirely.
-    provider: 'mock',
-    model: 'mock-1',
     seq: 0,
     ...overrides,
   };

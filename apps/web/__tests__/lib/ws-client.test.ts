@@ -95,12 +95,14 @@ beforeEach(() => {
   });
 });
 
+// Identity-only per the real `@argus/contracts` WsStartFrameSchema, which is
+// `.strict()` — provider/model are NOT on the start frame (they migrated to
+// the metadata frame). A start frame carrying them would fail validation and
+// route to onError instead of onFrame.
 const VALID_START = {
   type: 'start',
   messageId: '11111111-1111-4111-8111-111111111111',
   conversationId: '22222222-2222-4222-8222-222222222222',
-  provider: 'mock',
-  model: 'mock-1',
   seq: 0,
 };
 
