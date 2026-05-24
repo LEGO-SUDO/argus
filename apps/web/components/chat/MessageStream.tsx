@@ -65,9 +65,13 @@ import {
   type OpenHandler,
 } from '@/lib/ws-client';
 import { ChatHero } from './ChatHero';
+import { ContextMeter } from './ContextMeter';
 import { MessageComposer } from './MessageComposer';
+import { MessageContent } from './MessageContent';
 import { MessageList, MessageMeta } from './MessageList';
 import { OmittedIndicator } from './OmittedIndicator';
+import type { ProviderCatalog } from '@/lib/providers-api';
+import type { PinFallbackNotice } from '@/lib/use-conversation-history';
 import type { WsFrameInbound } from '@argus/contracts';
 
 /**
@@ -106,6 +110,20 @@ type MessageStreamProps = {
    * Optional so tests don't have to thread it through.
    */
   onConversationMinted?: (conversationId: string) => void;
+
+  // ----- ProviderPicker wiring, threaded through to MessageComposer (LLD
+  // Block G2/G3). All optional so existing tests/call sites that omit them
+  // fall back to the composer's legacy pills. -----
+  /** Provider catalog from ChatSurface's mount-time fetch. */
+  providerCatalog?: ProviderCatalog;
+  /** True while ChatSurface is still fetching the catalog — drives the
+   *  picker's disabled-loading state vs the empty-state (Codex finding #6). */
+  catalogLoading?: boolean;
+  /** Conversation pin (from useConversationHistory via ChatSurface). */
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
+  /** Inline stale-pin fallback notice (first paint of a resumed convo). */
+  pinFallbackNotice?: PinFallbackNotice;
 };
 
 export function MessageStream({
@@ -114,6 +132,11 @@ export function MessageStream({
   omittedCount = 0,
   wsClient,
   onConversationMinted,
+  providerCatalog,
+  catalogLoading = false,
+  pinnedProvider = null,
+  pinnedModel = null,
+  pinFallbackNotice,
 }: MessageStreamProps) {
   const router = useRouter();
   // Lazy init — applies `initialMessages` + `omittedCount` on first render
@@ -258,6 +281,29 @@ export function MessageStream({
     return null;
   }, [state.messages]);
 
+  // ContextMeter source (LLD Tasks 96-97): the MOST-RECENT assistant message
+  // whose status is `complete`. We deliberately skip failed/canceled rows —
+  // those never produced a final token-usage report, so their tokens fields
+  // are undefined and the literally-last row may be one of them. Scanning
+  // backwards yields the newest completed turn. Returns null when there is
+  // no completed assistant message yet (the meter then renders nothing).
+  //
+  // Codex finding #7 (stale-after-failed-turn) — INTENDED, not a bug. PRD
+  // (§"Token-count exactness" + "only fully-completed turns enter history")
+  // and HLD D5 specify the meter reflects the latest *completed* turn; failed
+  // and canceled turns do not count and must NOT clear or alter the meter.
+  // So after `complete → failed`, the meter correctly continues to show the
+  // last completed turn's usage rather than blanking. No change required.
+  const lastCompletedAssistant = useMemo(() => {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m && m.role === 'assistant' && m.status === 'complete') {
+        return m;
+      }
+    }
+    return null;
+  }, [state.messages]);
+
   // Send handler.
   //
   // Order matters: we attempt the WS send FIRST, then optimistically
@@ -267,18 +313,31 @@ export function MessageStream({
   // stuck. The user message is still appended in the success path so the
   // optimistic UI is responsive.
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, pin?: { provider: string; model: string }) => {
       if (!client) return;
       // Clear any stale connection banner — the user is taking a new action.
       // If the send below throws because the socket really is dead, we re-set
       // wsError in the catch branch with the actual reason.
       setWsError(null);
       const userMessageId = uuidv4Safe();
+      // First-turn pin (FIX 7): on a brand-new conversation (no id yet), carry
+      // the chosen pin on the `send` frame so the gateway honors it for THIS
+      // turn and persists it onto the freshly-minted row — closing the race
+      // where the old post-mint PATCH landed after the turn already streamed
+      // Auto. We send BOTH fields as non-empty strings or NEITHER (never null,
+      // never one): the contract rejects asymmetric/empty/null pins. For an
+      // existing conversation the pin lives on the row already (set via PATCH),
+      // so we omit it here.
+      const carryPin =
+        liveConvIdRef.current === null && pin ? pin : undefined;
       try {
         client.send({
           type: 'send',
           conversationId: liveConvIdRef.current,
           content: text,
+          ...(carryPin
+            ? { pinnedProvider: carryPin.provider, pinnedModel: carryPin.model }
+            : {}),
         });
       } catch (err) {
         // Surface to the user without locking the composer. We also do NOT
@@ -383,6 +442,19 @@ export function MessageStream({
               </div>
             ) : null}
 
+            {/* ContextMeter (LLD Task 97) — sourced from the most-recent
+             *  completed assistant turn. Returns null when no completed turn
+             *  exists yet (no layout box, no shift). Sits above MessageList,
+             *  below the OmittedIndicator slot per the placement decision. */}
+            {lastCompletedAssistant ? (
+              <div className="flex justify-center">
+                <ContextMeter
+                  tokensUsed={lastCompletedAssistant.tokensUsed}
+                  tokensBudget={lastCompletedAssistant.tokensBudget}
+                />
+              </div>
+            ) : null}
+
             {state.terminalError ? (
               <TerminalErrorBanner code={state.terminalError.errorCode} />
             ) : null}
@@ -397,11 +469,28 @@ export function MessageStream({
               >
                 <MessageMeta message={streaming} />
                 <div
-                  className="whitespace-pre-wrap text-[15px] leading-[1.62] text-chat-ink"
+                  className="text-[15px] leading-[1.62] text-chat-ink"
                   style={{ textWrap: 'pretty' }}
                 >
-                  {streaming.content || (
-                    <span className="text-chat-ink-3">…</span>
+                  {/* LLD Task 83 — render the live stream as Markdown.
+                   *  react-markdown is resilient to the partial/incomplete
+                   *  syntax that arrives mid-stream. The ellipsis placeholder
+                   *  shows before any tokens land; the blink caret is kept as
+                   *  a sibling so the streaming visual continues. */}
+                  {streaming.content ? (
+                    <MessageContent
+                      role="assistant"
+                      content={streaming.content}
+                      isStreaming
+                    />
+                  ) : (
+                    // Body placeholder before the first token. Decorative —
+                    // the SR "Assistant is responding…" cue lives in the meta
+                    // row (FIX 4), so this lone ellipsis is hidden from AT to
+                    // avoid announcing a meaningless "…".
+                    <span className="text-chat-ink-3" aria-hidden="true">
+                      …
+                    </span>
                   )}
                   <span className="caret" aria-hidden="true" />
                 </div>
@@ -427,6 +516,19 @@ export function MessageStream({
         streaming={streaming !== null}
         onSend={handleSend}
         onCancel={handleCancel}
+        // ProviderPicker wiring (LLD Block G2/G3). `conversationId` is the
+        // prop from ChatSurface (derived from the pathname); it is null on a
+        // brand-new conversation until the URL swap, then flips to the minted
+        // id without remounting. On a new conversation the composer carries its
+        // pre-send pin choice on the `send` frame via `onSend(text, pin)` (the
+        // gateway persists it) — design review FIX 7; the old post-mint PATCH
+        // for that path is gone. In-conversation pin changes still go via PATCH.
+        conversationId={conversationId}
+        catalog={providerCatalog}
+        catalogLoading={catalogLoading}
+        pinnedProvider={pinnedProvider}
+        pinnedModel={pinnedModel}
+        pinFallbackNotice={pinFallbackNotice}
       />
     </section>
   );

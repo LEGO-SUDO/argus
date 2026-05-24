@@ -49,8 +49,27 @@ export class AnthropicProvider implements ProviderAdapter {
     return typeof key === 'string' && key.length > 0;
   }
 
+  // LLD Task 22 — Anthropic model ids advertised to the picker. Matches the
+  // anthropic:* keys in cost.ts PRICEBOOK (4.x family + 3.5 family + the
+  // pinned 3-haiku-20240307 stable build).
+  listModels(): string[] {
+    return [
+      'claude-haiku-4-5',
+      'claude-haiku-4-5-20251001',
+      'claude-sonnet-4-6',
+      'claude-opus-4-7',
+      'claude-3-5-haiku-latest',
+      'claude-3-5-sonnet-latest',
+      'claude-3-opus-latest',
+      'claude-3-haiku-20240307',
+    ];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
-    const model = this.opts.model ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
+    // opts/env/default. See the matching comment in providers/openai.ts.
+    const model =
+      req.pin?.model ?? this.opts.model ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
     const maxTokens = this.opts.maxTokens ?? DEFAULT_MAX_TOKENS;
     const client = this.opts.client ?? this.buildClient();
 

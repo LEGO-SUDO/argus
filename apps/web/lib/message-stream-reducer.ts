@@ -3,9 +3,12 @@
 // without rendering anything.
 //
 // LLD references:
-//   Task 3-16   per-frame and per-action transitions
+//   Task 3-16   per-frame and per-action transitions (legacy LLD)
 //   Task 42     init carries `omittedCount`
 //   Task 57     terminal error before any `start` (e.g. no_providers_available)
+//   Tasks 1-20 (this LLD): metadata-frame discriminant + end-frame
+//   tokensUsed/tokensBudget hydration. Metadata frames are the SOLE source of
+//   provider/model — the start frame no longer carries them (HLD D1).
 //
 // Key invariants (HLD Regression Risk Surface):
 //   - A message_id that has reached a terminal state (complete/canceled/failed)
@@ -15,6 +18,11 @@
 //   - The reducer is pure: same (state, action) -> same nextState reference
 //     when no change applies (used by tests to assert "second submit is a
 //     no-op").
+//   - Metadata-frame protocol invariant: emitted EXACTLY ONCE per turn,
+//     sourced from the SDK commit chunk. Replays are no-ops; pre-start
+//     arrivals are discarded (NOT buffered). The reducer does not touch
+//     `lastAppliedSeq` for metadata frames — they are out-of-band with the
+//     token seq monotonicity tracking.
 //
 // All identifiers stay in the contracts vocabulary (`messageId` camelCase per
 // `@argus/contracts/ws`).
@@ -23,9 +31,20 @@ import type {
   WsEndFrame,
   WsErrorFrame,
   WsFrameOutbound,
+  WsMetadataFrame,
   WsStartFrame,
   WsTokenFrame,
 } from '@argus/contracts';
+
+// The reducer switches over the canonical outbound discriminated union from
+// `@argus/contracts` (which already includes the metadata frame). Re-exported
+// under the historical `StreamFrame` name so existing call sites/tests that
+// import it keep working.
+export type StreamFrame = WsFrameOutbound;
+
+// Re-export the canonical metadata frame type so any consumer that imported it
+// from this module continues to resolve to the contract type.
+export type { WsMetadataFrame };
 
 export type MessageRole = 'user' | 'assistant' | 'system';
 
@@ -49,6 +68,18 @@ export type Message = {
   errorCode?: string;
   /** Highest `seq` applied for this streaming message (drops out-of-order). */
   lastAppliedSeq?: number;
+  /**
+   * Tokens consumed by this assistant turn (prompt + completion). Set ONLY
+   * on `status === 'complete'`; absent for failed/canceled turns. Source:
+   * the `end` frame on the SDK final usage chunk (LLD Tasks 17-20).
+   */
+  tokensUsed?: number;
+  /**
+   * Context-window budget for the model that served this turn. Same as
+   * tokensUsed: present only when status === 'complete'. Drives the
+   * ContextMeter UI in `MessageStream`.
+   */
+  tokensBudget?: number;
 };
 
 /**
@@ -94,7 +125,9 @@ export type Action =
     }
   | {
       type: 'frame';
-      frame: WsFrameOutbound;
+      // Widened to include the metadata frame (LLD Tasks 1-16). See
+      // `StreamFrame` declaration above for the cross-LLD coordination note.
+      frame: StreamFrame;
     }
   | {
       type: 'composer-submitted';
@@ -192,7 +225,7 @@ export function reducer(state: State, action: Action): State {
   }
 }
 
-function applyFrame(state: State, frame: WsFrameOutbound): State {
+function applyFrame(state: State, frame: StreamFrame): State {
   switch (frame.type) {
     case 'start':
       return applyStart(state, frame);
@@ -207,6 +240,8 @@ function applyFrame(state: State, frame: WsFrameOutbound): State {
       // component if desired; the reducer treats cancel-ack as informational.
       // The actual terminal transition arrives via the subsequent `end`.
       return state;
+    case 'metadata':
+      return applyMetadata(state, frame);
   }
 }
 
@@ -217,13 +252,18 @@ function applyStart(state: State, frame: WsStartFrame): State {
   if (isTerminal(state, frame.messageId)) {
     return state;
   }
+  // LLD Tasks 3-4: the streaming bubble is PROVISIONAL on start — no
+  // provider/model yet. The metadata frame (emitted once after the SDK
+  // commit chunk) fills those in. This matches HLD D1: there is no
+  // "provisional" provider; the committed adapter is the single source of
+  // truth. The contract's `WsStartFrame` is identity-only (messageId,
+  // conversationId, seq=0) — it carries no provider/model to read, so the
+  // misleading-provider race is structurally impossible.
   const streaming: StreamingMessage = {
     id: frame.messageId,
     role: 'assistant',
     content: '',
     status: 'streaming',
-    provider: frame.provider,
-    model: frame.model,
     lastAppliedSeq: 0,
   };
   return {
@@ -231,6 +271,30 @@ function applyStart(state: State, frame: WsStartFrame): State {
     streaming,
     composerDisabled: true,
   };
+}
+
+function applyMetadata(state: State, frame: WsMetadataFrame): State {
+  // Metadata-frame semantics (LLD Tasks 1-16):
+  //   - Requires an ACTIVE streaming bubble (Task 9-10: late metadata for
+  //     an already-promoted message is a no-op; Task 15-16: pre-start
+  //     metadata is DISCARDED, not buffered).
+  //   - messageId MUST match the active bubble (Task 7-8).
+  //   - Replay with identical payload is a no-op (Task 5-6).
+  //   - Does NOT advance `lastAppliedSeq` (Task 13-14) — token-seq
+  //     monotonicity is out-of-band from metadata frames.
+  const current = state.streaming;
+  if (!current) return state;
+  if (current.id !== frame.messageId) return state;
+  const { provider, model } = frame.providerMeta;
+  if (current.provider === provider && current.model === model) {
+    return state; // idempotent replay
+  }
+  const nextStreaming: StreamingMessage = {
+    ...current,
+    provider,
+    model,
+  };
+  return { ...state, streaming: nextStreaming };
 }
 
 function applyToken(state: State, frame: WsTokenFrame): State {
@@ -276,6 +340,21 @@ function applyEnd(state: State, frame: WsEndFrame): State {
     canRetry: frame.status === 'failed',
     lastAppliedSeq: undefined,
   };
+  // LLD Tasks 17-20: tokensUsed/tokensBudget are copied onto the promoted
+  // message ONLY on status === 'complete'. The contract's `WsEndFrame`
+  // declares both as top-level optional non-negative integers and its zod
+  // schema rejects them on any non-complete terminal, so a failed/canceled
+  // frame can never legitimately carry them — but we still gate on status
+  // here so the reducer never reads usage off a non-complete row even if a
+  // malformed frame slips past parsing.
+  if (frame.status === 'complete') {
+    if (typeof frame.tokensUsed === 'number') {
+      promoted.tokensUsed = frame.tokensUsed;
+    }
+    if (typeof frame.tokensBudget === 'number') {
+      promoted.tokensBudget = frame.tokensBudget;
+    }
+  }
   return {
     ...state,
     streaming: null,

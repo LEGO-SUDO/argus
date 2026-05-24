@@ -106,8 +106,6 @@ describe('MessageStream — cancel button visibility', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({ type: 'token', messageId: MSG_ID, seq: 1, content: 'hi' });
@@ -131,8 +129,6 @@ describe('MessageStream — cancel click sends cancel frame', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     await userEvent.click(screen.getByRole('button', { name: /cancel/i }));
@@ -158,8 +154,6 @@ describe('MessageStream — retry on failed turn', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({
@@ -200,8 +194,6 @@ describe('MessageStream — retry on failed turn', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     stub.fire({
@@ -242,8 +234,6 @@ describe('MessageStream — composer disabled while streaming', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(input).toBeDisabled();
@@ -304,7 +294,7 @@ describe('MessageStream — omitted indicator', () => {
 });
 
 describe('MessageStream — provider/model label', () => {
-  it('renders provider and model on completed assistant message', () => {
+  it('renders provider and model on completed assistant message (sourced from metadata frame)', () => {
     const stub = makeStubClient();
     render(
       <MessageStream
@@ -317,15 +307,247 @@ describe('MessageStream — provider/model label', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: CONV_ID,
-      provider: 'openai',
-      model: 'gpt-4',
       seq: 0,
     });
-    stub.fire({ type: 'token', messageId: MSG_ID, seq: 1, content: 'ok' });
-    stub.fire({ type: 'end', messageId: MSG_ID, seq: 2, status: 'complete' });
+    // Metadata frame (post-commit) is the SOLE source of provider/model per
+    // HLD D1 + LLD Tasks 1-4. The start frame is identity-only; emit a
+    // metadata frame so the chip and promoted message acquire the strings.
+    // `WsMetadataFrame` is a member of `WsFrameOutbound` in the real
+    // contract, so no cast is needed.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4' },
+    });
+    stub.fire({ type: 'token', messageId: MSG_ID, seq: 2, content: 'ok' });
+    stub.fire({ type: 'end', messageId: MSG_ID, seq: 3, status: 'complete' });
     // Both strings appear in the rendered tree.
     expect(screen.getByText(/openai/i)).toBeInTheDocument();
     expect(screen.getByText(/gpt-4/i)).toBeInTheDocument();
+  });
+});
+
+describe('MessageStream — streaming chip provisional state', () => {
+  it('shows the provider-pending ellipsis before metadata, then provider/model after', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    // start frame → provisional streaming bubble, no provider yet.
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    expect(
+      screen.getByTestId('message-meta-provider-pending'),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('message-stream-provider')).toBeNull();
+
+    // metadata frame → provider/model populate; the ellipsis is replaced.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4o-mini' },
+    });
+    expect(screen.queryByTestId('message-meta-provider-pending')).toBeNull();
+    expect(screen.getByTestId('message-stream-provider')).toHaveTextContent(
+      'openai',
+    );
+    expect(screen.getByTestId('message-stream-model')).toHaveTextContent(
+      'gpt-4o-mini',
+    );
+  });
+
+  // Design review FIX 4 — the provisional chip used to be aria-hidden, so SR
+  // users got no "assistant is responding" cue and the provider swap was
+  // silent. The provisional state now carries an sr-only label; it disappears
+  // (no double-announce) once the provider/model land.
+  it('exposes an sr-only "responding" cue while provisional, removed once metadata lands', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    const srCue = screen.getByTestId('message-meta-provider-pending-sr');
+    expect(srCue).toHaveTextContent(/assistant is responding/i);
+
+    // Provider lands — the provisional cue (and its SR label) are gone so the
+    // provisional state isn't re-announced alongside the provider chip.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4o-mini' },
+    });
+    expect(
+      screen.queryByTestId('message-meta-provider-pending-sr'),
+    ).toBeNull();
+  });
+
+  it('renders the streaming region before any token, then the markdown body after', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    expect(screen.getByTestId('message-stream-streaming')).toBeInTheDocument();
+    expect(screen.queryByTestId('message-content-markdown')).toBeNull();
+    stub.fire({ type: 'token', messageId: MSG_ID, seq: 2, content: 'hi' });
+    expect(screen.getByTestId('message-content-markdown')).toBeInTheDocument();
+  });
+});
+
+describe('MessageStream — threads picker props to MessageComposer', () => {
+  const CATALOG = {
+    providers: [
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0.15,
+        completionPerMillion: 0.6,
+        contextWindow: 128000,
+      },
+    ],
+  };
+
+  it('renders the ProviderPicker (not legacy pills) when a catalog is threaded', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={CATALOG}
+      />,
+    );
+    expect(screen.getByTestId('provider-picker-trigger')).toBeInTheDocument();
+    expect(screen.queryByTestId('message-composer-provider-pill')).toBeNull();
+  });
+
+  it('shows the threaded pin on the picker and renders the fallback notice', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={CATALOG}
+        pinnedProvider="openai"
+        pinnedModel="gpt-4o-mini"
+        pinFallbackNotice={{ provider: 'anthropic', model: 'claude-3-5-sonnet' }}
+      />,
+    );
+    expect(screen.getByTestId('provider-picker-trigger')).toHaveAccessibleName(
+      /gpt-4o-mini/i,
+    );
+    const notice = screen.getByTestId('pin-fallback-notice');
+    expect(notice).toHaveTextContent(/anthropic/);
+    expect(notice).toHaveTextContent(/claude-3-5-sonnet/);
+  });
+
+  it('puts the picker in its loading state when catalogLoading is true', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={{ providers: [] }}
+        catalogLoading
+      />,
+    );
+    const trigger = screen.getByTestId('provider-picker-trigger');
+    expect(trigger).toHaveTextContent('Loading models…');
+    expect(trigger).not.toHaveTextContent(/No providers configured/i);
+  });
+});
+
+describe('MessageStream — ContextMeter (LLD Tasks 96-97)', () => {
+  it('sources tokens from the last COMPLETED assistant message, ignoring failed/canceled rows', () => {
+    const stub = makeStubClient();
+    // Order matters: completed (has tokens) → failed (no tokens) → canceled
+    // (no tokens). The meter must read the completed row, NOT the literal
+    // last row.
+    const completed: Message = {
+      id: 'a-complete',
+      role: 'assistant',
+      content: 'done',
+      status: 'complete',
+      provider: 'mock',
+      model: 'mock-1',
+      tokensUsed: 5000,
+      tokensBudget: 10000,
+    };
+    const failed: Message = {
+      id: 'a-failed',
+      role: 'assistant',
+      content: 'boom',
+      status: 'failed',
+      errorCode: 'provider_error',
+      canRetry: true,
+    };
+    const canceled: Message = {
+      id: 'a-canceled',
+      role: 'assistant',
+      content: 'partial',
+      status: 'canceled',
+    };
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[completed, failed, canceled]}
+        wsClient={stub.client}
+      />,
+    );
+    expect(screen.getByTestId('context-meter')).toHaveTextContent(
+      '5k / 10k tokens',
+    );
+  });
+
+  it('renders no meter when there is no completed assistant message', () => {
+    const stub = makeStubClient();
+    const failed: Message = {
+      id: 'a-failed',
+      role: 'assistant',
+      content: 'boom',
+      status: 'failed',
+      errorCode: 'provider_error',
+      canRetry: true,
+    };
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[failed]}
+        wsClient={stub.client}
+      />,
+    );
+    expect(screen.queryByTestId('context-meter')).toBeNull();
   });
 });
 
@@ -382,8 +604,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(replaceMock).toHaveBeenCalledWith(`/chat/${NEW_CONV_ID}`);
@@ -406,8 +626,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
     expect(onMinted).toHaveBeenCalledWith(NEW_CONV_ID);
@@ -444,8 +662,6 @@ describe('MessageStream — null conversation URL swap on first start', () => {
       type: 'start',
       messageId: MSG_ID,
       conversationId: NEW_CONV_ID,
-      provider: 'mock',
-      model: 'mock-1',
       seq: 0,
     });
 
@@ -471,6 +687,108 @@ describe('MessageStream — null conversation URL swap on first start', () => {
     // The stub was never closed by the component — verifying we did NOT
     // unmount and recreate during the URL change.
     expect(stub.closed()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design review FIX 7 — first-turn pin carried on the WS `send` frame. On a
+// brand-new conversation (conversationId null) a pre-send pin must ride the
+// send frame so the gateway honors it for turn 1 and persists it; Auto must
+// omit BOTH fields (never null, never one). The redundant post-mint PATCH for
+// the pre-send-pin path is gone (asserted in the MessageComposer suite).
+// ---------------------------------------------------------------------------
+describe('MessageStream — first-turn pin on the send frame (FIX 7)', () => {
+  const PIN_CATALOG = {
+    providers: [
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0.15,
+        completionPerMillion: 0.6,
+        contextWindow: 128000,
+      },
+    ],
+  };
+
+  it('includes pinnedProvider/pinnedModel on the send frame when a pre-mint pin is set', async () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={null}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={PIN_CATALOG}
+      />,
+    );
+    // Pick a model pre-send (no conversation id yet → held locally).
+    await userEvent.click(screen.getByTestId('provider-picker-trigger'));
+    await userEvent.click(screen.getByRole('option', { name: /gpt-4o-mini/i }));
+    // Send the first turn.
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /message/i }),
+      'first pinned turn',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /^send$/i }));
+
+    const sendFrame = stub.sent.find((f) => f.type === 'send');
+    expect(sendFrame).toMatchObject({
+      type: 'send',
+      conversationId: null,
+      content: 'first pinned turn',
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+  });
+
+  it('omits BOTH pin fields (not null, not one) on the send frame for Auto', async () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={null}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={PIN_CATALOG}
+      />,
+    );
+    // No pin chosen → Auto.
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /message/i }),
+      'auto turn',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /^send$/i }));
+
+    const sendFrame = stub.sent.find((f) => f.type === 'send');
+    expect(sendFrame).toBeDefined();
+    // Neither field present — the contract rejects null / asymmetric pins, so
+    // Auto must OMIT both (not send null).
+    expect(sendFrame && 'pinnedProvider' in sendFrame).toBe(false);
+    expect(sendFrame && 'pinnedModel' in sendFrame).toBe(false);
+  });
+
+  it('does NOT carry the pin on the frame for an EXISTING conversation', async () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={PIN_CATALOG}
+        pinnedProvider="openai"
+        pinnedModel="gpt-4o-mini"
+      />,
+    );
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /message/i }),
+      'existing convo turn',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /^send$/i }));
+
+    const sendFrame = stub.sent.find((f) => f.type === 'send');
+    expect(sendFrame).toBeDefined();
+    // The pin lives on the conversation row already (set via PATCH); the frame
+    // must not duplicate it.
+    expect(sendFrame && 'pinnedProvider' in sendFrame).toBe(false);
+    expect(sendFrame && 'pinnedModel' in sendFrame).toBe(false);
   });
 });
 

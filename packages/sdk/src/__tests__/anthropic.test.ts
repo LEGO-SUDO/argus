@@ -92,6 +92,23 @@ describe('AnthropicProvider', () => {
     expect(args.messages).toEqual([{ role: 'user', content: 'hi' }]);
   });
 
+  it('uses req.pin.model in the outbound create() call, overriding env/default (Codex review #1)', async () => {
+    const create = jest
+      .fn()
+      .mockResolvedValue(asyncIterableOf([{ type: 'message_stop' }]));
+    // No model opt and no env — would default to claude-haiku-4-5 without the pin.
+    const provider = new AnthropicProvider({
+      apiKey: 'k',
+      client: { messages: { create } } as never,
+    });
+    const chunks = await collect(
+      provider.stream(makeReq({ pin: { provider: 'anthropic', model: 'claude-opus-4-7' } })),
+    );
+    expect(create.mock.calls[0]![0].model).toBe('claude-opus-4-7');
+    const done = chunks.find((c) => c.type === 'done');
+    expect(done && done.type === 'done' && done.providerMeta.model).toBe('claude-opus-4-7');
+  });
+
   it('maps an AuthenticationError to ProviderError(auth_failed)', async () => {
     const client = {
       messages: {

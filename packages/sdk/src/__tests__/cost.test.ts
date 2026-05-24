@@ -1,4 +1,9 @@
-import { computeCost, priceFor } from '../cost';
+import {
+  computeCost,
+  priceFor,
+  getCatalogEntry,
+  getEffectiveBudget,
+} from '../cost';
 
 describe('cost.computeCost', () => {
   it('computes micro-USD for a known model', () => {
@@ -43,5 +48,58 @@ describe('cost.computeCost', () => {
       completionPerMillion: 0,
     });
     expect(priceFor('openai', 'nope')).toBeUndefined();
+  });
+});
+
+// chat-context-and-ux-polish LLD Tasks 15-18 — context-window + budget
+// accessors. The picker UI needs catalog-side numbers (`getCatalogEntry`),
+// and the gateway needs an effective budget (`getEffectiveBudget`) that
+// respects the pinned model's window.
+describe('cost.getCatalogEntry (Tasks 15/16)', () => {
+  it('returns combined cost + integer context window for known openai entries', () => {
+    const entry = getCatalogEntry('openai', 'gpt-4o-mini');
+    expect(entry).not.toBeNull();
+    expect(entry!.promptPerMillion).toBe(0.15);
+    expect(entry!.completionPerMillion).toBe(0.6);
+    expect(Number.isInteger(entry!.contextWindow)).toBe(true);
+    expect(entry!.contextWindow).toBe(128_000);
+  });
+
+  it('returns the right context windows per provider family', () => {
+    expect(getCatalogEntry('openai', 'gpt-3.5-turbo')!.contextWindow).toBe(16_000);
+    expect(getCatalogEntry('anthropic', 'claude-haiku-4-5')!.contextWindow).toBe(200_000);
+    expect(getCatalogEntry('anthropic', 'claude-3-haiku-20240307')!.contextWindow).toBe(200_000);
+    expect(getCatalogEntry('gemini', 'gemini-3-flash-preview')!.contextWindow).toBe(1_048_576);
+    expect(getCatalogEntry('gemini', 'gemini-1.5-pro')!.contextWindow).toBe(2_097_152);
+    expect(getCatalogEntry('mock', 'mock-1')!.contextWindow).toBe(8192);
+  });
+
+  it('returns null for unknown (provider, model)', () => {
+    expect(getCatalogEntry('openai', 'gpt-unicorn-9000')).toBeNull();
+    expect(getCatalogEntry('anthropic', 'claude-not-yet-shipped')).toBeNull();
+  });
+});
+
+describe('cost.getEffectiveBudget (Tasks 17/18)', () => {
+  it('returns the configured default when no pin is supplied', () => {
+    expect(getEffectiveBudget(10000)).toBe(10000);
+    expect(getEffectiveBudget(10000, undefined)).toBe(10000);
+  });
+
+  it('returns the configured default when pinned model window is LARGER than default', () => {
+    // openai:gpt-4o-mini has a 128k window; default 10000 < 128_000 → 10000.
+    expect(getEffectiveBudget(10000, { provider: 'openai', model: 'gpt-4o-mini' })).toBe(10000);
+  });
+
+  it('returns the pinned model window when it is SMALLER than the default', () => {
+    // mock:mock-1 has 8192 window; default 10000 → cap to 8192.
+    expect(getEffectiveBudget(10000, { provider: 'mock', model: 'mock-1' })).toBe(8192);
+  });
+
+  it('tolerates unknown pin (returns configured default without throwing)', () => {
+    expect(getEffectiveBudget(10000, { provider: 'openai', model: 'gpt-unicorn-9000' })).toBe(10000);
+    expect(() =>
+      getEffectiveBudget(10000, { provider: 'openai', model: 'gpt-unicorn-9000' }),
+    ).not.toThrow();
   });
 });

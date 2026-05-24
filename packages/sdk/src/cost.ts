@@ -1,4 +1,4 @@
-// Cost calculator — static USD pricebook per (provider, model).
+// Cost calculator + catalog accessors — static pricebook per (provider, model).
 //
 // Pricing snapshot as of 2026-05-24 (USD per 1,000,000 tokens, separated by
 // prompt vs completion). Verify against each provider's pricing page before
@@ -7,7 +7,12 @@
 //   - Anthropic: https://www.anthropic.com/pricing
 //   - Google:    https://ai.google.dev/pricing
 //
-// All amounts returned in **micro-USD** (integer) to avoid float drift —
+// Context windows: integer token caps sourced from public provider pages.
+// Each pricebook entry carries `contextWindow` so the picker can render the
+// number and the gateway can compute an effective budget bounded by the
+// pinned model (chat-context-and-ux-polish LLD Tasks 15/16/17/18, HLD D4).
+//
+// All cost amounts returned in **micro-USD** (integer) to avoid float drift —
 // the projection consumer stores micro-USD ints in Postgres, so this keeps
 // the wire format coherent end-to-end.
 //
@@ -24,38 +29,48 @@ interface ModelPrice {
   completionPerMillion: number;
 }
 
+/** Pricebook entry with the context window cap layered on. */
+interface CatalogEntry extends ModelPrice {
+  /** Integer token cap for this model. */
+  contextWindow: number;
+}
+
 /** Pricing snapshot as of 2026-05-24. Update with the snapshot date when bumping. */
-const PRICEBOOK: Record<string, ModelPrice> = {
+const PRICEBOOK: Record<string, CatalogEntry> = {
   // ---- OpenAI ----
-  'openai:gpt-4o-mini': { promptPerMillion: 0.15, completionPerMillion: 0.6 },
-  'openai:gpt-4o': { promptPerMillion: 2.5, completionPerMillion: 10.0 },
-  'openai:gpt-4-turbo': { promptPerMillion: 10.0, completionPerMillion: 30.0 },
-  'openai:gpt-3.5-turbo': { promptPerMillion: 0.5, completionPerMillion: 1.5 },
+  // gpt-4o family: 128k. gpt-4-turbo: 128k. gpt-3.5-turbo: 16k (per OpenAI docs).
+  'openai:gpt-4o-mini': { promptPerMillion: 0.15, completionPerMillion: 0.6, contextWindow: 128_000 },
+  'openai:gpt-4o': { promptPerMillion: 2.5, completionPerMillion: 10.0, contextWindow: 128_000 },
+  'openai:gpt-4-turbo': { promptPerMillion: 10.0, completionPerMillion: 30.0, contextWindow: 128_000 },
+  'openai:gpt-3.5-turbo': { promptPerMillion: 0.5, completionPerMillion: 1.5, contextWindow: 16_000 },
 
   // ---- Anthropic ----
-  // Claude 4.x family (current generation).
-  'anthropic:claude-haiku-4-5': { promptPerMillion: 1.0, completionPerMillion: 5.0 },
-  'anthropic:claude-haiku-4-5-20251001': { promptPerMillion: 1.0, completionPerMillion: 5.0 },
-  'anthropic:claude-sonnet-4-6': { promptPerMillion: 3.0, completionPerMillion: 15.0 },
-  'anthropic:claude-opus-4-7': { promptPerMillion: 15.0, completionPerMillion: 75.0 },
+  // Claude 4.x family + 3.5 family + 3-haiku-20240307: 200k window across the board.
+  'anthropic:claude-haiku-4-5': { promptPerMillion: 1.0, completionPerMillion: 5.0, contextWindow: 200_000 },
+  'anthropic:claude-haiku-4-5-20251001': { promptPerMillion: 1.0, completionPerMillion: 5.0, contextWindow: 200_000 },
+  'anthropic:claude-sonnet-4-6': { promptPerMillion: 3.0, completionPerMillion: 15.0, contextWindow: 200_000 },
+  'anthropic:claude-opus-4-7': { promptPerMillion: 15.0, completionPerMillion: 75.0, contextWindow: 200_000 },
   // Legacy 3.x family — kept for downgrade paths.
-  'anthropic:claude-3-5-haiku-latest': { promptPerMillion: 0.8, completionPerMillion: 4.0 },
-  'anthropic:claude-3-5-sonnet-latest': { promptPerMillion: 3.0, completionPerMillion: 15.0 },
-  'anthropic:claude-3-opus-latest': { promptPerMillion: 15.0, completionPerMillion: 75.0 },
-  'anthropic:claude-3-haiku-20240307': { promptPerMillion: 0.25, completionPerMillion: 1.25 },
+  'anthropic:claude-3-5-haiku-latest': { promptPerMillion: 0.8, completionPerMillion: 4.0, contextWindow: 200_000 },
+  'anthropic:claude-3-5-sonnet-latest': { promptPerMillion: 3.0, completionPerMillion: 15.0, contextWindow: 200_000 },
+  'anthropic:claude-3-opus-latest': { promptPerMillion: 15.0, completionPerMillion: 75.0, contextWindow: 200_000 },
+  'anthropic:claude-3-haiku-20240307': { promptPerMillion: 0.25, completionPerMillion: 1.25, contextWindow: 200_000 },
 
   // ---- Google ----
   // Gemini 3.x is preview; Google hasn't published rates so price as zero
-  // (operator console renders "—"). Update when GA pricing lands.
-  'gemini:gemini-3-flash-preview': { promptPerMillion: 0, completionPerMillion: 0 },
-  // Legacy 2.x / 1.5 family — kept for fallback paths.
-  'gemini:gemini-2.0-flash-exp': { promptPerMillion: 0, completionPerMillion: 0 },
-  'gemini:gemini-1.5-flash': { promptPerMillion: 0.075, completionPerMillion: 0.3 },
-  'gemini:gemini-1.5-pro': { promptPerMillion: 1.25, completionPerMillion: 5.0 },
+  // (operator console renders "—"). Context windows are public though: the
+  // 3-flash-preview and 2.0-flash-exp inherit the 1.5-flash 1M-token ceiling;
+  // 1.5-pro extends to 2M.
+  'gemini:gemini-3-flash-preview': { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 1_048_576 },
+  'gemini:gemini-2.0-flash-exp': { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 1_048_576 },
+  'gemini:gemini-1.5-flash': { promptPerMillion: 0.075, completionPerMillion: 0.3, contextWindow: 1_048_576 },
+  'gemini:gemini-1.5-pro': { promptPerMillion: 1.25, completionPerMillion: 5.0, contextWindow: 2_097_152 },
 
   // ---- Mock ----
-  // Free — keeps dev runs at zero so the operator console treats them as "—".
-  'mock:mock-1': { promptPerMillion: 0, completionPerMillion: 0 },
+  // Free + small window — keeps dev runs visible. The 8k cap lets the
+  // ContextMeter "near full" UX trigger on a chat of modest length without
+  // requiring callers to override the env budget.
+  'mock:mock-1': { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 8192 },
 };
 
 export interface CostBreakdown {
@@ -95,7 +110,75 @@ function toMicros(pricePerMillion: number, tokens: number): number {
   return Math.round(pricePerMillion * tokens);
 }
 
-/** Exposed for tests to assert the pricebook contains an expected entry. */
+/**
+ * Exposed for tests to assert the pricebook contains an expected entry.
+ *
+ * KEEP this byte-identical to its pre-backbone shape (no contextWindow field)
+ * — Phase A callers (cost.test.ts at file-load time) assert exact equality
+ * against `{ promptPerMillion, completionPerMillion }`. The new accessors
+ * below expose the contextWindow.
+ */
 export function priceFor(provider: ProviderName, model: string): ModelPrice | undefined {
-  return PRICEBOOK[`${provider}:${model}`];
+  const entry = PRICEBOOK[`${provider}:${model}`];
+  if (!entry) return undefined;
+  return {
+    promptPerMillion: entry.promptPerMillion,
+    completionPerMillion: entry.completionPerMillion,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// chat-context-and-ux-polish LLD Tasks 15-18 — catalog + budget accessors.
+// ---------------------------------------------------------------------------
+
+/** Combined accessor: cost + context window for a (provider, model) pair. */
+export interface CatalogEntryReadout {
+  promptPerMillion: number;
+  completionPerMillion: number;
+  contextWindow: number;
+}
+
+/**
+ * Return combined cost + context window for a known (provider, model) pair,
+ * or null when the pair is not in the pricebook. The picker uses this to
+ * decorate model entries with both pricing and a numeric window cap.
+ */
+export function getCatalogEntry(
+  provider: ProviderName,
+  model: string,
+): CatalogEntryReadout | null {
+  const entry = PRICEBOOK[`${provider}:${model}`];
+  if (!entry) return null;
+  return {
+    promptPerMillion: entry.promptPerMillion,
+    completionPerMillion: entry.completionPerMillion,
+    contextWindow: entry.contextWindow,
+  };
+}
+
+/** Pin descriptor — both fields required when present (caller's coupling rule). */
+export interface PinDescriptor {
+  provider: ProviderName | string;
+  model: string;
+}
+
+/**
+ * Compute the effective context budget for a turn given the configured
+ * default and an optional pin.
+ *
+ * Rules (HLD D4 + LLD Task 18):
+ *   - No pin → return the configured default unchanged.
+ *   - Pinned to a known model → return min(default, model's contextWindow).
+ *   - Pinned to an unknown (provider, model) → return the configured default
+ *     (do not throw; the picker may transiently lag the catalog and we'd
+ *     rather over-budget by the default than fail the request).
+ */
+export function getEffectiveBudget(
+  configuredDefault: number,
+  pin?: PinDescriptor,
+): number {
+  if (!pin) return configuredDefault;
+  const entry = getCatalogEntry(pin.provider as ProviderName, pin.model);
+  if (!entry) return configuredDefault;
+  return Math.min(configuredDefault, entry.contextWindow);
 }

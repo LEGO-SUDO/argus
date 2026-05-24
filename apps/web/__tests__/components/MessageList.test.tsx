@@ -7,6 +7,7 @@
 //   - Canceled marker uses `data-testid="message-status-canceled"`
 //   - Hover-actions row exists for assistant messages
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MessageList } from '@/components/chat/MessageList';
 import type { Message } from '@/lib/message-stream-reducer';
 
@@ -127,5 +128,23 @@ describe('MessageList — hover actions', () => {
     expect(screen.getByTestId('message-actions-m-asst-1')).toBeInTheDocument();
     expect(screen.getByTestId('message-action-view-trace-m-asst-1')).toBeInTheDocument();
     expect(screen.getByTestId('message-action-copy-m-asst-1')).toBeInTheDocument();
+  });
+
+  // Task 80-81 — copy action must source the RAW Markdown source
+  // (message.content), not the rendered DOM text. The bubble now renders
+  // Markdown via MessageContent, so a naive innerText read would lose the
+  // `**` markers.
+  it('copies the raw Markdown source (message.content), not the rendered text', async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const messages: Message[] = [
+      assistantMsg({ id: 'm-asst-1', content: '**bold** answer' }),
+    ];
+    render(<MessageList messages={messages} onRetry={() => undefined} />);
+    await userEvent.click(screen.getByTestId('message-action-copy-m-asst-1'));
+    expect(writeText).toHaveBeenCalledWith('**bold** answer');
   });
 });

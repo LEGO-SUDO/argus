@@ -1,10 +1,19 @@
-// Tasks 47-54 — StreamOrchestrator.
+// StreamOrchestrator.
+//
+// chat-context-and-ux-polish backbone (LLD Tasks 40-47, 56-59):
+//   - On the SDK `commit` chunk, emit the WS `metadata` frame (seq=1).
+//     EXACTLY ONCE per turn even if the SDK defensively yields duplicates.
+//   - Pre-token failure: no metadata frame ever leaks (Preamble §3).
+//   - Meter wiring on the `complete` terminal: tolerates throws, omits
+//     context fields on failure; never invoked on failed/canceled terminals.
 import { StreamOrchestrator } from '../../src/chat/stream-orchestrator';
 import { SeqCounterRegistry } from '../../src/chat/seq-counter';
 import type { ChatService } from '../../src/chat/chat.service';
+import type { ContextMeterService } from '../../src/chat/context-meter.service';
 import type { ChatStreamChunk } from '@argus/sdk';
 import type { WsFrameOutbound } from '@argus/contracts';
 import { randomUUID } from 'crypto';
+import { trace, type Span, type Tracer } from '@opentelemetry/api';
 
 const messageId = randomUUID();
 const conversationId = randomUUID();
@@ -34,6 +43,11 @@ function fakeChatService(): { svc: ChatService; rec: FakeChatRecord } {
 function tokenStream(tokens: string[]): AsyncIterable<ChatStreamChunk> {
   return {
     async *[Symbol.asyncIterator]() {
+      // Backbone: the SDK now ships a synthetic `commit` chunk before the
+      // first non-empty token (LLD Task 28). Mirror it here so the
+      // orchestrator emits the `metadata` frame on the same trajectory the
+      // real router takes.
+      yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
       for (const t of tokens) {
         yield { type: 'token', content: t };
       }
@@ -51,6 +65,10 @@ function pausedStream(
 ): AsyncIterable<ChatStreamChunk> {
   return {
     async *[Symbol.asyncIterator]() {
+      // Match the real router's synthetic commit chunk so the orchestrator
+      // emits the metadata frame; tests that count frame indices below skip
+      // past it.
+      yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
       for (let i = 0; i < tokens.length; i++) {
         if (abortSignal.aborted) return;
         const tok = tokens[i]!;
@@ -79,7 +97,7 @@ function emitter(): { emit: (f: WsFrameOutbound) => void; frames: WsFrameOutboun
 
 describe('StreamOrchestrator', () => {
   describe('happy path', () => {
-    it('emits start → tokens → end in order with strictly increasing seq', async () => {
+    it('emits start@0 → metadata@1 → tokens@2..N → end with strictly increasing seq', async () => {
       const seqRegistry = new SeqCounterRegistry();
       const { svc, rec } = fakeChatService();
       const { emit, frames } = emitter();
@@ -87,8 +105,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: tokenStream(['a', 'b', 'c']),
         abort,
         emit,
@@ -96,9 +112,15 @@ describe('StreamOrchestrator', () => {
       await o.runStream();
 
       const types = frames.map((f) => f.type);
-      expect(types).toEqual(['start', 'token', 'token', 'token', 'end']);
+      // Backbone: metadata@1 lives between start@0 and the token chain.
+      expect(types).toEqual(['start', 'metadata', 'token', 'token', 'token', 'end']);
       const seqs = frames.map((f) => ('seq' in f ? f.seq : -1));
-      expect(seqs).toEqual([0, 1, 2, 3, 4]);
+      expect(seqs).toEqual([0, 1, 2, 3, 4, 5]);
+      const meta = frames.find((f) => f.type === 'metadata')!;
+      expect(meta.type === 'metadata' && meta.providerMeta).toEqual({
+        provider: 'mock',
+        model: 'mock-1',
+      });
       const end = frames.find((f) => f.type === 'end')!;
       expect(end.type === 'end' && end.status).toBe('complete');
       expect(rec.completes).toEqual([{ messageId, content: 'abc' }]);
@@ -122,8 +144,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: stream,
         abort,
         emit,
@@ -142,8 +162,8 @@ describe('StreamOrchestrator', () => {
       await runP;
 
       const types = frames.map((f) => f.type);
-      // Two tokens, then cancel-ack + end. No third token frame.
-      expect(types).toEqual(['start', 'token', 'token', 'cancel-ack', 'end']);
+      // start@0, metadata@1, two tokens, then cancel-ack + end. No third token.
+      expect(types).toEqual(['start', 'metadata', 'token', 'token', 'cancel-ack', 'end']);
       const end = frames.find((f) => f.type === 'end')!;
       expect(end.type === 'end' && end.status).toBe('canceled');
       expect(rec.cancels).toEqual([{ messageId, partial: 'xy' }]);
@@ -165,8 +185,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: stream,
         abort,
         emit,
@@ -202,6 +220,7 @@ describe('StreamOrchestrator', () => {
       // body runs back-to-back.
       const tightStream: AsyncIterable<ChatStreamChunk> = {
         async *[Symbol.asyncIterator]() {
+          yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
           yield { type: 'token', content: 'a' };
           yield { type: 'token', content: 'b' };
           // Third token — by the time we reach here, the orchestrator may
@@ -214,8 +233,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: tightStream,
         abort,
         emit,
@@ -261,8 +278,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: errStream,
         abort,
         emit,
@@ -278,6 +293,299 @@ describe('StreamOrchestrator', () => {
       expect(rec.fails).toEqual([
         { messageId, partial: '', code: 'provider_unavailable' },
       ]);
+    });
+  });
+
+  // chat-context-and-ux-polish LLD Tasks 42/44 — metadata-frame guards.
+  describe('metadata frame exactly-once + pre-token guard', () => {
+    it('emits exactly one metadata frame even on duplicate commit chunks', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+
+      const dupCommit: AsyncIterable<ChatStreamChunk> = {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          // Defensive duplicate — orchestrator MUST coalesce.
+          yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          yield { type: 'token', content: 'a' };
+          yield { type: 'done', providerMeta: { provider: 'mock', model: 'mock-1' } };
+        },
+      };
+
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        sdkStream: dupCommit,
+        abort,
+        emit,
+      });
+      await o.runStream();
+      const metadataFrames = frames.filter((f) => f.type === 'metadata');
+      expect(metadataFrames).toHaveLength(1);
+    });
+
+    // chat-context-and-ux-polish (Codex review — runtime invariant: metadata
+    // exactly once per completed turn). A malformed/injected SDK stream that
+    // emits `done` with NO commit and NO token must still get a defensive
+    // metadata frame so a completed turn always carries metadata exactly once.
+    it('emits a defensive metadata frame from done when the stream never committed and emitted no token', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const warn = jest
+        .spyOn(
+          (StreamOrchestrator as unknown as { logger: { warn: (m: string) => void } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      try {
+        const commitlessDone: AsyncIterable<ChatStreamChunk> = {
+          async *[Symbol.asyncIterator]() {
+            // No commit, no token — just a terminal done.
+            yield { type: 'done', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          },
+        };
+        const o = new StreamOrchestrator(svc, seqRegistry, {
+          messageId,
+          conversationId,
+          sdkStream: commitlessDone,
+          abort,
+          emit,
+        });
+        await o.runStream();
+        const types = frames.map((f) => f.type);
+        expect(types).toEqual(['start', 'metadata', 'end']);
+        const seqs = frames.map((f) => ('seq' in f ? f.seq : -1));
+        expect(seqs).toEqual([0, 1, 2]);
+        const meta = frames.find((f) => f.type === 'metadata')!;
+        expect(meta.type === 'metadata' && meta.providerMeta).toEqual({
+          provider: 'mock',
+          model: 'mock-1',
+        });
+        expect(warn.mock.calls[0]![0] as string).toContain('metadata.missing_commit');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('pre-token error: NO metadata frame leaks between start and the terminal failure end', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc, rec } = fakeChatService();
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+
+      const errStream: AsyncIterable<ChatStreamChunk> = {
+        async *[Symbol.asyncIterator]() {
+          const e = new Error('pinned provider missing') as Error & { code: string };
+          e.code = 'pinned_provider_unavailable';
+          throw e;
+        },
+      };
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        sdkStream: errStream,
+        abort,
+        emit,
+      });
+      await o.runStream();
+
+      const types = frames.map((f) => f.type);
+      expect(types).toEqual(['start', 'error', 'end']);
+      // No metadata frame leaked.
+      expect(frames.some((f) => f.type === 'metadata')).toBe(false);
+      const end = frames.find((f) => f.type === 'end')!;
+      expect(end.type === 'end' && end.status).toBe('failed');
+      expect(rec.fails[0]!.code).toBe('pinned_provider_unavailable');
+    });
+  });
+
+  // chat-context-and-ux-polish LLD Tasks 56-59 — meter wiring on the
+  // `complete` terminal path. Tolerates throws (omit fields); never invoked
+  // on failed/canceled terminals.
+  describe('context meter on the complete terminal', () => {
+    function meterStub(
+      result: { tokensUsed: number; tokensBudget: number } | Error,
+    ): {
+      svc: ContextMeterService;
+      calls: { conversationId: string; userId: string; messageId?: string }[];
+    } {
+      const calls: { conversationId: string; userId: string; messageId?: string }[] = [];
+      const svc = {
+        compute: async (input: { conversationId: string; userId: string; messageId?: string }) => {
+          calls.push(input);
+          if (result instanceof Error) throw result;
+          return result;
+        },
+      } as unknown as ContextMeterService;
+      return { svc, calls };
+    }
+
+    it('threads tokensUsed + tokensBudget onto the end frame on the happy complete path', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const meter = meterStub({ tokensUsed: 250, tokensBudget: 10000 });
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const userId = randomUUID();
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        userId,
+        meter: meter.svc,
+        sdkStream: tokenStream(['a', 'b']),
+        abort,
+        emit,
+      });
+      await o.runStream();
+      const end = frames.find((f) => f.type === 'end')!;
+      expect(end.type === 'end' && end.tokensUsed).toBe(250);
+      expect(end.type === 'end' && end.tokensBudget).toBe(10000);
+      // The orchestrator threads the turn's messageId so the meter's
+      // truncation event can correlate to this turn.
+      expect(meter.calls).toEqual([{ conversationId, userId, messageId }]);
+    });
+
+    it('meter throwing does NOT prevent the terminal end frame — both fields absent', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const meter = meterStub(new Error('meter blew up'));
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        userId: randomUUID(),
+        meter: meter.svc,
+        sdkStream: tokenStream(['a']),
+        abort,
+        emit,
+      });
+      await o.runStream();
+      const end = frames.find((f) => f.type === 'end')!;
+      expect(end.type === 'end' && end.status).toBe('complete');
+      expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+      expect(end.type === 'end' && end.tokensBudget).toBeUndefined();
+    });
+
+    // chat-context-and-ux-polish (Codex review — meter-failure observability).
+    // A meter throw must be queryable without Sentry: a structured log AND a
+    // span carrying llm.context_meter_failed=true.
+    it('on a meter throw, emits a structured log and a span with llm.context_meter_failed=true', async () => {
+      // Capture the span's attributes by spying on the tracer.
+      const setAttribute = jest.fn();
+      const fakeSpan = { setAttribute, end: jest.fn() } as unknown as Span;
+      const startSpan = jest.fn().mockReturnValue(fakeSpan);
+      const getTracer = jest
+        .spyOn(trace, 'getTracer')
+        .mockReturnValue({ startSpan } as unknown as Tracer);
+      const warn = jest
+        .spyOn(
+          (StreamOrchestrator as unknown as { logger: { warn: (m: string) => void } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      try {
+        const seqRegistry = new SeqCounterRegistry();
+        const { svc } = fakeChatService();
+        const meter = meterStub(new Error('meter blew up'));
+        const { emit, frames } = emitter();
+        const abort = new AbortController();
+        const o = new StreamOrchestrator(svc, seqRegistry, {
+          messageId,
+          conversationId,
+          userId: randomUUID(),
+          meter: meter.svc,
+          sdkStream: tokenStream(['a']),
+          abort,
+          emit,
+        });
+        await o.runStream();
+
+        // Structured log fired with the queryable attribute keyword.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0] as string).toContain('llm.context_meter_failed=true');
+        expect(warn.mock.calls[0]![0] as string).toContain(`messageId=${messageId}`);
+
+        // Span carries the attribute.
+        expect(startSpan).toHaveBeenCalledWith('chat.context_meter');
+        expect(setAttribute).toHaveBeenCalledWith('llm.context_meter_failed', true);
+        expect(setAttribute).toHaveBeenCalledWith('message.id', messageId);
+
+        // The end frame still ships (non-fatal) without context fields.
+        const end = frames.find((f) => f.type === 'end')!;
+        expect(end.type === 'end' && end.status).toBe('complete');
+        expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+      } finally {
+        warn.mockRestore();
+        getTracer.mockRestore();
+      }
+    });
+
+    it('meter never invoked on the failed terminal; end carries neither token field', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const meter = meterStub({ tokensUsed: 999, tokensBudget: 10000 });
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const errStream: AsyncIterable<ChatStreamChunk> = {
+        async *[Symbol.asyncIterator]() {
+          const e = new Error('boom') as Error & { code: string };
+          e.code = 'sdk_error';
+          throw e;
+        },
+      };
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        userId: randomUUID(),
+        meter: meter.svc,
+        sdkStream: errStream,
+        abort,
+        emit,
+      });
+      await o.runStream();
+      expect(meter.calls).toHaveLength(0);
+      const end = frames.find((f) => f.type === 'end')!;
+      expect(end.type === 'end' && end.status).toBe('failed');
+      expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+      expect(end.type === 'end' && end.tokensBudget).toBeUndefined();
+    });
+
+    it('meter never invoked on the canceled terminal; end carries neither token field', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const meter = meterStub({ tokensUsed: 999, tokensBudget: 10000 });
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const gates = [makeGate(), makeGate()];
+      gates[0]!.resolve();
+      const stream = pausedStream(['a', 'b'], gates, abort.signal);
+
+      const o = new StreamOrchestrator(svc, seqRegistry, {
+        messageId,
+        conversationId,
+        userId: randomUUID(),
+        meter: meter.svc,
+        sdkStream: stream,
+        abort,
+        emit,
+      });
+      const runP = o.runStream();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      await new Promise((r) => setImmediate(r));
+      await o.cancel();
+      gates[1]!.resolve();
+      await runP;
+
+      expect(meter.calls).toHaveLength(0);
+      const end = frames.find((f) => f.type === 'end')!;
+      expect(end.type === 'end' && end.status).toBe('canceled');
+      expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+      expect(end.type === 'end' && end.tokensBudget).toBeUndefined();
     });
   });
 });

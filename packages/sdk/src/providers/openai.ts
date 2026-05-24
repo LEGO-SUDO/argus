@@ -49,8 +49,22 @@ export class OpenAIProvider implements ProviderAdapter {
     return typeof key === 'string' && key.length > 0;
   }
 
+  // LLD Task 21 — model ids the OpenAI adapter advertises. Must stay in sync
+  // with the openai:* entries in cost.ts PRICEBOOK; the catalog accessor
+  // (getCatalogEntry) joins on (provider, model) to hydrate price + window.
+  listModels(): string[] {
+    return ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
-    const model = this.opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
+    // chat-context-and-ux-polish (Codex review #1) — pin's model wins. The
+    // router routes us via the override branch (pin.provider === 'openai'),
+    // so a pinned model here is the operator's explicit choice and MUST
+    // override the env / DEFAULT fallback. Without this, every pinned turn
+    // silently runs against OPENAI_MODEL (or gpt-4o-mini) regardless of what
+    // the picker said.
+    const model =
+      req.pin?.model ?? this.opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
     const client = this.opts.client ?? this.buildClient();
 
     let response;

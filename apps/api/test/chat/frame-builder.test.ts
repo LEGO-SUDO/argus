@@ -1,12 +1,18 @@
-// Tasks 33-38 — frame-builder helpers validated against contracts schemas.
+// Frame-builder helpers validated against contracts schemas.
+//
+// chat-context-and-ux-polish backbone (LLD Tasks 36/37/39):
+//   - `buildStartFrame` is identity-only (no provider/model — Task 2/39).
+//   - `buildMetadataFrame` is the seq=1 envelope sourced from the SDK
+//     `commit` chunk's providerMeta payload (Task 36).
 import {
   buildCancelAckFrame,
   buildEndFrame,
   buildErrorFrame,
+  buildMetadataFrame,
   buildStartFrame,
   buildTokenFrame,
 } from '../../src/chat/frame-builder';
-import { WsFrameOutboundSchema } from '@argus/contracts';
+import { WsFrameOutboundSchema, WsMetadataFrameSchema } from '@argus/contracts';
 import { SeqCounter } from '../../src/chat/seq-counter';
 import { randomUUID } from 'crypto';
 
@@ -14,21 +20,35 @@ const conversationId = randomUUID();
 const messageId = randomUUID();
 
 describe('frame-builder', () => {
-  it('buildStartFrame returns a valid start envelope with seq=0', () => {
+  it('buildStartFrame returns a valid identity-only start envelope with seq=0', () => {
     const frame = buildStartFrame({
       messageId,
       conversationId,
-      provider: 'openai',
-      model: 'gpt-4o-mini',
     });
-    expect(frame).toMatchObject({
+    expect(frame).toEqual({
       type: 'start',
       messageId,
       conversationId,
-      provider: 'openai',
-      model: 'gpt-4o-mini',
       seq: 0,
     });
+    expect(WsFrameOutboundSchema.safeParse(frame).success).toBe(true);
+  });
+
+  it('buildMetadataFrame returns a valid metadata envelope at seq=1 carrying providerMeta', () => {
+    const providerMeta = {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      promptTokens: 7,
+      completionTokens: 3,
+    };
+    const frame = buildMetadataFrame(messageId, providerMeta);
+    expect(frame).toEqual({
+      type: 'metadata',
+      messageId,
+      seq: 1,
+      providerMeta,
+    });
+    expect(WsMetadataFrameSchema.safeParse(frame).success).toBe(true);
     expect(WsFrameOutboundSchema.safeParse(frame).success).toBe(true);
   });
 

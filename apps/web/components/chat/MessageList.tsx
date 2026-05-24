@@ -22,6 +22,7 @@
 
 import { useCallback } from 'react';
 import type { Message } from '@/lib/message-stream-reducer';
+import { MessageContent } from './MessageContent';
 
 type MessageListProps = {
   messages: Message[];
@@ -122,12 +123,18 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
       <div
         data-testid={`message-bubble-${message.id}`}
         className={
-          'whitespace-pre-wrap text-[15px] leading-[1.62] ' +
+          'text-[15px] leading-[1.62] ' +
           (isFailed ? 'text-chat-ink-2' : 'text-chat-ink')
         }
         style={{ textWrap: 'pretty' }}
       >
-        {message.content}
+        {/* LLD Task 82 — assistant content renders as Markdown. The raw
+         *  source still lives in `message.content`; the copy action below
+         *  reads from there (Task 80-81), not from this rendered DOM.
+         *  `whitespace-pre-wrap` was dropped from the wrapper because
+         *  react-markdown emits real block elements (the prior plain-text
+         *  path relied on it for newline preservation). */}
+        <MessageContent role="assistant" content={message.content} />
       </div>
 
       {/* Interrupted marker — appended as a sibling, not a footer pill. */}
@@ -243,6 +250,15 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
  * render the same shape above its streaming bubble.
  */
 export function MessageMeta({ message }: { message: Message }) {
+  // Provisional state (LLD Tasks 141-144): an assistant row whose provider is
+  // not yet known (the metadata frame hasn't arrived) shows an ellipsis
+  // placeholder next to "assistant" so the chip reads as clearly in-progress
+  // rather than blank. The swap to the real provider name is keyed purely on
+  // `message.provider` being set — which the reducer does at metadata-frame
+  // time (NOT on the first token). User/system rows never show the ellipsis.
+  const isAssistant = message.role === 'assistant';
+  const isProvisional = isAssistant && !message.provider;
+
   return (
     <div
       data-testid={`message-meta-${message.id}`}
@@ -272,6 +288,25 @@ export function MessageMeta({ message }: { message: Message }) {
             ) : null}
           </span>
         </>
+      ) : isProvisional ? (
+        <span
+          data-testid="message-meta-provider-pending"
+          className="text-chat-ink-3"
+        >
+          {/* Visual ellipsis — purely decorative, hidden from AT. */}
+          <span aria-hidden="true">…</span>
+          {/* SR cue (design review FIX 4): the bare "…" gave screen readers no
+           *  "assistant is responding" signal and the provider swap was
+           *  silent. This sr-only label rides the streaming region's existing
+           *  role="log" aria-live="polite" wrapper (we do NOT add a nested
+           *  live region here, which would double-announce). Once the provider
+           *  lands this whole branch is replaced by the provider chip — whose
+           *  text the SAME live region announces — so there is no
+           *  double-announcement of the provisional state. */}
+          <span className="sr-only" data-testid="message-meta-provider-pending-sr">
+            Assistant is responding…
+          </span>
+        </span>
       ) : null}
     </div>
   );

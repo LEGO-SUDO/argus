@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "isolatedModules": true,
+    "composite": false,
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*"]
+}

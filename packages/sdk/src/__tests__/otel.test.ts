@@ -127,3 +127,83 @@ describe('startLlmSpan lifecycle', () => {
     expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(100 * 1024);
   });
 });
+
+// chat-context-and-ux-polish LLD Tasks 33/34 — observability attrs for the
+// context-meter and pinned-provider/divergence telemetry.
+describe('startLlmSpan — new context + pin attrs (Tasks 33/34)', () => {
+  function makeReqWithHints(extra: Partial<ChatStreamRequest>): ChatStreamRequest {
+    return { ...makeReq(), ...extra };
+  }
+
+  it('exposes effectiveBudget + contextWindowCap as numeric attrs when hints are passed', () => {
+    const span = startLlmSpan(
+      makeReqWithHints({ effectiveBudget: 8192, contextWindowCap: 128_000 }),
+    );
+    span.succeed({ provider: 'openai', model: 'gpt-4o-mini' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.context_budget_effective']).toBe(8192);
+    expect(s.attributes['llm.context_window_cap']).toBe(128_000);
+  });
+
+  it('omits the budget/cap attrs when the hints are not passed (backward compat)', () => {
+    const span = startLlmSpan(makeReq());
+    span.succeed({ provider: 'openai', model: 'gpt-4o-mini' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.context_budget_effective']).toBeUndefined();
+    expect(s.attributes['llm.context_window_cap']).toBeUndefined();
+  });
+
+  it('on pinned_provider_unavailable failure, sets llm.pinned_failure=true', () => {
+    const span = startLlmSpan(makeReqWithHints({ guessProvider: 'openai' }));
+    span.fail(
+      'openai',
+      'gpt-4o-mini',
+      'pinned_provider_unavailable',
+      new Error('boom'),
+      '',
+    );
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBe(true);
+    expect(s.attributes['llm.error_code']).toBe('pinned_provider_unavailable');
+  });
+
+  it('on non-pin failure, sets llm.pinned_failure=false', () => {
+    const span = startLlmSpan(makeReqWithHints({ guessProvider: 'openai' }));
+    span.fail('openai', 'gpt-4o-mini', 'auth_failed', new Error('boom'), '');
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBe(false);
+  });
+
+  it('on success with guess != committed, sets llm.guess_commit_divergent=true', () => {
+    const span = startLlmSpan(makeReqWithHints({ guessProvider: 'openai' }));
+    // Committed adapter is anthropic — diverges from guess `openai`.
+    span.succeed({ provider: 'anthropic', model: 'claude-haiku-4-5' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.guess_commit_divergent']).toBe(true);
+  });
+
+  it('on success with guess == committed, sets llm.guess_commit_divergent=false', () => {
+    const span = startLlmSpan(makeReqWithHints({ guessProvider: 'openai' }));
+    span.succeed({ provider: 'openai', model: 'gpt-4o-mini' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.guess_commit_divergent']).toBe(false);
+  });
+
+  // chat-context-and-ux-polish LLD Task 90 (Codex review #4) — pinned-non-
+  // failure case. A pinned turn that SUCCEEDS stamps llm.pinned_failure=false.
+  it('on a pinned turn that succeeds, sets llm.pinned_failure=false', () => {
+    const span = startLlmSpan(
+      makeReqWithHints({ pin: { provider: 'anthropic', model: 'claude-opus-4-7' } }),
+    );
+    span.succeed({ provider: 'anthropic', model: 'claude-opus-4-7' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBe(false);
+  });
+
+  it('on an UNPINNED turn that succeeds, omits llm.pinned_failure entirely', () => {
+    const span = startLlmSpan(makeReq());
+    span.succeed({ provider: 'openai', model: 'gpt-4o-mini' }, 'out');
+    const s = getSpan();
+    expect(s.attributes['llm.pinned_failure']).toBeUndefined();
+  });
+});
