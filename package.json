@@ -1,0 +1,46 @@
+{
+  "name": "argus",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Argus — LLM chatbot with OTel-native inference observability.",
+  "packageManager": "pnpm@10.33.3",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "e2e": "pnpm --filter @argus/e2e test",
+    "compose:up": "docker compose -f infra/compose/docker-compose.yml --env-file .env up --build",
+    "compose:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env down",
+    "compose:logs": "docker compose -f infra/compose/docker-compose.yml --env-file .env logs -f",
+    "compose:ps": "docker compose -f infra/compose/docker-compose.yml --env-file .env ps",
+    "compose:reset": "docker compose -f infra/compose/docker-compose.yml --env-file .env down -v",
+    "infra:up": "docker compose -f infra/compose/docker-compose.yml --env-file .env up -d postgres redpanda redpanda-bootstrap otel-collector jaeger",
+    "infra:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env down"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.6.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "glob": "^13.0.6",
+      "rimraf@<4": "^6.0.1",
+      "inflight": "npm:lru-cache@^10.4.3",
+      "webpack@<5.104.1": "^5.104.1",
+      "picomatch@<4.0.4": "^4.0.4",
+      "postcss@<8.5.10": "^8.5.10",
+      "qs@<6.15.2": "^6.15.2",
+      "multer@<2.1.1": "^2.1.1",
+      "tmp@<0.2.4": "^0.2.4",
+      "ajv@>=7 <8.18.0": "^8.18.0",
+      "file-type@<21.3.2": "^21.3.2"
+    }
+  }
+}
