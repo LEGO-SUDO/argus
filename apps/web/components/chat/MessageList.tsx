@@ -250,6 +250,15 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
  * render the same shape above its streaming bubble.
  */
 export function MessageMeta({ message }: { message: Message }) {
+  // Provisional state (LLD Tasks 141-144): an assistant row whose provider is
+  // not yet known (the metadata frame hasn't arrived) shows an ellipsis
+  // placeholder next to "assistant" so the chip reads as clearly in-progress
+  // rather than blank. The swap to the real provider name is keyed purely on
+  // `message.provider` being set — which the reducer does at metadata-frame
+  // time (NOT on the first token). User/system rows never show the ellipsis.
+  const isAssistant = message.role === 'assistant';
+  const isProvisional = isAssistant && !message.provider;
+
   return (
     <div
       data-testid={`message-meta-${message.id}`}
@@ -279,6 +288,14 @@ export function MessageMeta({ message }: { message: Message }) {
             ) : null}
           </span>
         </>
+      ) : isProvisional ? (
+        <span
+          data-testid="message-meta-provider-pending"
+          className="text-chat-ink-3"
+          aria-hidden="true"
+        >
+          …
+        </span>
       ) : null}
     </div>
   );
