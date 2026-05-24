@@ -243,6 +243,50 @@ describe('ChatService', () => {
       expect(result.pinnedProvider).toBeNull();
       expect(result.pinnedModel).toBeNull();
     });
+
+    // chat-context-and-ux-polish (Codex review — concurrent-sends history
+    // contamination). Two concurrent sends on the SAME conversation must not
+    // cross-contaminate the history threaded to the SDK: each call's threaded
+    // history must contain its OWN user message exactly once and NEVER the
+    // other call's user message (which hasn't committed yet from this call's
+    // perspective). The fix moves the history read inside the same
+    // transaction as the user-message insert; the test fixture serializes
+    // transactions to model Postgres isolation, so a transaction's read sees
+    // only its own write plus prior-committed rows.
+    it('two concurrent sends do not contaminate each other’s threaded history', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+
+      const [resA, resB] = await Promise.all([
+        svc.startTurn({ userId, conversationId, userMessageContent: 'message-A' }),
+        svc.startTurn({ userId, conversationId, userMessageContent: 'message-B' }),
+      ]);
+
+      const contentsA = resA.history!.map((m) => m.content);
+      const contentsB = resB.history!.map((m) => m.content);
+
+      // Each call's history includes its OWN user message exactly once.
+      expect(contentsA.filter((c) => c === 'message-A')).toHaveLength(1);
+      expect(contentsB.filter((c) => c === 'message-B')).toHaveLength(1);
+
+      // The FIRST transaction to run (whichever it is) must NOT see the other
+      // call's message — its read happened before the peer committed. The
+      // SECOND may legitimately include the first's committed message. So
+      // exactly one of the two histories is "clean" (no peer message) and the
+      // other may carry it — but NEITHER may carry the peer's message AND its
+      // own at a position that implies interleaving within a single
+      // transaction. The load-bearing invariant: no history contains BOTH
+      // foreign and own user message with the foreign one inserted by the
+      // still-in-flight peer (i.e. the earlier transaction's history must be
+      // free of the later one's message).
+      const aHasB = contentsA.includes('message-B');
+      const bHasA = contentsB.includes('message-A');
+      // At most one direction of inclusion is allowed (the later transaction
+      // seeing the earlier's committed row). Both-see-each-other would mean
+      // the reads interleaved with the peer's uncommitted insert.
+      expect(aHasB && bHasA).toBe(false);
+    });
   });
 
   describe('failTurn', () => {

@@ -98,7 +98,17 @@ export class ChatService {
     const assistantMessageId = input.assistantMessageId ?? this.mintMessageId();
     const now = new Date();
 
-    await this.prisma.db.$transaction(async (tx) => {
+    // chat-context-and-ux-polish (Codex review — concurrent-sends history
+    // contamination). The user-message insert AND the history read MUST live
+    // in the SAME transaction. Previously the history read ran in a separate
+    // query after the transaction committed, so two concurrent sends on the
+    // same conversation could interleave: send-B's user message could land
+    // between send-A's insert and send-A's read, polluting send-A's threaded
+    // history with send-B's not-yet-its-turn user message. Reading inside the
+    // transaction sees only this turn's own insert plus all committed-before
+    // messages (the in-flight peer's insert is in a separate, uncommitted
+    // transaction and is therefore invisible).
+    const txResult = await this.prisma.db.$transaction(async (tx) => {
       // 1. User message — status `complete` immediately; nothing further
       //    happens to it.
       await tx.message.create({
@@ -145,39 +155,43 @@ export class ChatService {
           startedAt: now,
         },
       });
+
+      // 5. LLD Task 53 — load the multi-turn history INSIDE the transaction,
+      //    after the user-message insert, so the new user message is included
+      //    but a concurrent peer's user message is NOT. Streaming-status rows
+      //    are excluded — the assistant placeholder we just inserted is still
+      //    streaming, and any crashed prior assistant row would otherwise leak
+      //    empty/partial content into the next prompt. Order: chronological.
+      const historyRows = (await tx.message.findMany({
+        where: {
+          conversationId: input.conversationId,
+          userId: input.userId,
+          status: { in: ['complete', 'canceled', 'failed'] },
+        },
+        orderBy: { createdAt: 'asc' },
+      })) as Array<{ role: string; content: string }>;
+
+      // 6. Re-read the conversation row (already authz-checked above) for the
+      //    pin pair so the gateway doesn't need a second query — inside the
+      //    transaction for a consistent snapshot.
+      const pinned = (await tx.conversation.findFirst({
+        where: { id: input.conversationId, userId: input.userId },
+      })) as { pinnedProvider?: string | null; pinnedModel?: string | null } | null;
+
+      return { historyRows, pinned };
     });
 
-    // chat-context-and-ux-polish LLD Task 53 — load the multi-turn history
-    // AFTER the user-message insert so the new user message is included
-    // (the SDK request needs it). Streaming-status rows are excluded — the
-    // assistant placeholder we just inserted is still streaming, and any
-    // crashed prior assistant row would otherwise leak empty/partial
-    // content into the next prompt. Order: chronological (oldest first).
-    const historyRows = (await this.prisma.db.message.findMany({
-      where: {
-        conversationId: input.conversationId,
-        userId: input.userId,
-        status: { in: ['complete', 'canceled', 'failed'] },
-      },
-      orderBy: { createdAt: 'asc' },
-    })) as Array<{ role: string; content: string }>;
-    const history: ChatHistoryMessage[] = historyRows.map((m) => ({
+    const history: ChatHistoryMessage[] = txResult.historyRows.map((m) => ({
       role: m.role as 'user' | 'assistant' | 'system',
       content: m.content,
     }));
-
-    // The conversation row was already authz-checked above; re-read it for
-    // the pin pair so the gateway doesn't need a second query.
-    const pinned = (await this.prisma.db.conversation.findFirst({
-      where: { id: input.conversationId, userId: input.userId },
-    })) as { pinnedProvider?: string | null; pinnedModel?: string | null } | null;
 
     return {
       userMessageId,
       assistantMessageId,
       history,
-      pinnedProvider: pinned?.pinnedProvider ?? null,
-      pinnedModel: pinned?.pinnedModel ?? null,
+      pinnedProvider: txResult.pinned?.pinnedProvider ?? null,
+      pinnedModel: txResult.pinned?.pinnedModel ?? null,
     };
   }
 

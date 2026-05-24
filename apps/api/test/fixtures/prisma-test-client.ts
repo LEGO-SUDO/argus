@@ -421,10 +421,28 @@ export class InMemoryPrisma {
     },
   };
 
-  // $transaction runs callback against `this` — atomicity is not modeled
-  // (single-threaded JS, no concurrent writers in tests).
+  // chat-context-and-ux-polish (Codex review — concurrent-sends history
+  // contamination). Real Postgres transactions are isolated: a transaction's
+  // reads do not see another in-flight transaction's uncommitted writes. The
+  // previous fixture ran the callback against `this` immediately, so two
+  // `Promise.all`'d transactions interleaved their awaited writes and reads —
+  // the opposite of what Postgres does, making the contamination bug invisible
+  // to tests. We model the relevant guarantee (no interleaving of one
+  // transaction's body with another's) by SERIALIZING transactions through a
+  // promise chain. A transaction body runs to completion before the next one
+  // starts, so a read inside the transaction sees only its own writes plus
+  // those of transactions that fully committed before it began.
+  private txChain: Promise<unknown> = Promise.resolve();
+
   async $transaction<T>(fn: (tx: InMemoryPrisma) => Promise<T>): Promise<T> {
-    return fn(this);
+    const run = this.txChain.then(() => fn(this));
+    // Keep the chain alive even if a transaction body rejects, so a failed
+    // transaction doesn't wedge subsequent ones.
+    this.txChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   async $queryRaw(_strings: TemplateStringsArray, ..._values: unknown[]): Promise<unknown> {
