@@ -64,19 +64,21 @@ export function ChatSurface() {
   // when the user navigates to a different conversation (so the new one
   // lazy-inits its reducer with the freshly-fetched `initialMessages`).
   //
-  // Strategy: maintain `mountKey` that only bumps when conversationId
-  // transitions to a value that is NOT in mintedIds. The first mount
-  // anchors on whatever the initial conversationId is.
-  const [mountKey, setMountKey] = useState<string>(
-    () => conversationId ?? 'new',
-  );
+  // Strategy: a monotonic counter that bumps on every non-mint transition.
+  // Using a counter (rather than the conversationId itself as the key)
+  // avoids the collision where two distinct states map to the same key
+  // value — e.g. user is on `/chat` (key=N), mints id-A (key stays N), then
+  // clicks "New conversation" back to `/chat` (would-be key still N → no
+  // remount → stale messages from id-A). The counter guarantees distinct
+  // values across every user-driven navigation.
+  const [mountKey, setMountKey] = useState<number>(0);
   const prevConvIdRef = useRef<string | null>(conversationId);
   useEffect(() => {
     if (prevConvIdRef.current === conversationId) return;
     const isMintedTransition =
       conversationId !== null && mintedIds.has(conversationId);
     if (!isMintedTransition) {
-      setMountKey(conversationId ?? 'new');
+      setMountKey((k) => k + 1);
     }
     prevConvIdRef.current = conversationId;
     // mintedIds intentionally excluded — only the conversationId change

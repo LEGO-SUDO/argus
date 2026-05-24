@@ -206,6 +206,10 @@ export function MessageStream({
         // pathname change.
         onMintedRef.current?.(mintedId);
         routerRef.current.replace(`/chat/${mintedId}`);
+        // Re-fetch Server Component data for the current tree — pulls
+        // the freshly-created conversation into the sidebar list without
+        // a full page reload.
+        routerRef.current.refresh();
       }
       dispatch({ type: 'frame', frame });
     };
