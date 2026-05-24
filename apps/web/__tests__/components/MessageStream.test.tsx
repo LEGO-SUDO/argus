@@ -366,6 +366,41 @@ describe('MessageStream — streaming chip provisional state', () => {
     );
   });
 
+  // Design review FIX 4 — the provisional chip used to be aria-hidden, so SR
+  // users got no "assistant is responding" cue and the provider swap was
+  // silent. The provisional state now carries an sr-only label; it disappears
+  // (no double-announce) once the provider/model land.
+  it('exposes an sr-only "responding" cue while provisional, removed once metadata lands', () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[]}
+        wsClient={stub.client}
+      />,
+    );
+    stub.fire({
+      type: 'start',
+      messageId: MSG_ID,
+      conversationId: CONV_ID,
+      seq: 0,
+    });
+    const srCue = screen.getByTestId('message-meta-provider-pending-sr');
+    expect(srCue).toHaveTextContent(/assistant is responding/i);
+
+    // Provider lands — the provisional cue (and its SR label) are gone so the
+    // provisional state isn't re-announced alongside the provider chip.
+    stub.fire({
+      type: 'metadata',
+      messageId: MSG_ID,
+      seq: 1,
+      providerMeta: { provider: 'openai', model: 'gpt-4o-mini' },
+    });
+    expect(
+      screen.queryByTestId('message-meta-provider-pending-sr'),
+    ).toBeNull();
+  });
+
   it('renders the streaming region before any token, then the markdown body after', () => {
     const stub = makeStubClient();
     render(

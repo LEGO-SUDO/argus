@@ -292,9 +292,20 @@ export function MessageMeta({ message }: { message: Message }) {
         <span
           data-testid="message-meta-provider-pending"
           className="text-chat-ink-3"
-          aria-hidden="true"
         >
-          …
+          {/* Visual ellipsis — purely decorative, hidden from AT. */}
+          <span aria-hidden="true">…</span>
+          {/* SR cue (design review FIX 4): the bare "…" gave screen readers no
+           *  "assistant is responding" signal and the provider swap was
+           *  silent. This sr-only label rides the streaming region's existing
+           *  role="log" aria-live="polite" wrapper (we do NOT add a nested
+           *  live region here, which would double-announce). Once the provider
+           *  lands this whole branch is replaced by the provider chip — whose
+           *  text the SAME live region announces — so there is no
+           *  double-announcement of the provisional state. */}
+          <span className="sr-only" data-testid="message-meta-provider-pending-sr">
+            Assistant is responding…
+          </span>
         </span>
       ) : null}
     </div>

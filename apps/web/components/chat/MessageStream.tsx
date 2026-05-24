@@ -471,7 +471,13 @@ export function MessageStream({
                       isStreaming
                     />
                   ) : (
-                    <span className="text-chat-ink-3">…</span>
+                    // Body placeholder before the first token. Decorative —
+                    // the SR "Assistant is responding…" cue lives in the meta
+                    // row (FIX 4), so this lone ellipsis is hidden from AT to
+                    // avoid announcing a meaningless "…".
+                    <span className="text-chat-ink-3" aria-hidden="true">
+                      …
+                    </span>
                   )}
                   <span className="caret" aria-hidden="true" />
                 </div>
