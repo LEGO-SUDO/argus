@@ -51,6 +51,30 @@ function listMigrationFiles(): string[] {
   return dirs.map((d) => join(MIGRATIONS_DIR, d, 'migration.sql'));
 }
 
+// Postgres' extended-query protocol (which Prisma's `$executeRawUnsafe` uses)
+// rejects multiple commands in a single call: "cannot insert multiple commands
+// into a prepared statement". A whole migration.sql file is many statements, so
+// we split it and run each one separately. Our migrations are plain DDL with no
+// dollar-quoting / function bodies, so splitting on `;` is safe. Chunks that are
+// only comments or whitespace (e.g. a trailing comment after the last `;`) are
+// dropped — leading `-- ` comment lines on a real statement are harmless
+// (Postgres ignores them).
+export function splitSqlStatements(sql: string): string[] {
+  // Drop full-line `--` comments BEFORE splitting on `;`. A comment may itself
+  // contain a semicolon (e.g. "-- ... (trace_id, span_id); without this index")
+  // which would otherwise be read as a false statement boundary. Prisma keeps
+  // comments on their own lines, so dropping whole comment lines is sufficient
+  // and avoids slicing a `--` that might appear inside a quoted literal.
+  const code = sql
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n');
+  return code
+    .split(';')
+    .map((stmt) => stmt.trim())
+    .filter((stmt) => stmt.length > 0);
+}
+
 export async function bootIntegrationEnv(): Promise<IntegrationEnv> {
   const container = await new PostgreSqlContainer('postgres:16-alpine')
     .withDatabase('argus_test')
@@ -65,7 +89,9 @@ export async function bootIntegrationEnv(): Promise<IntegrationEnv> {
   const adminPrisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   for (const file of listMigrationFiles()) {
     const sql = readFileSync(file, 'utf8');
-    await adminPrisma.$executeRawUnsafe(sql);
+    for (const statement of splitSqlStatements(sql)) {
+      await adminPrisma.$executeRawUnsafe(statement);
+    }
   }
   await adminPrisma.$disconnect();
 
