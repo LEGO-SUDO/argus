@@ -155,6 +155,96 @@ describe('ChatService', () => {
     });
   });
 
+  // chat-context-and-ux-polish LLD Tasks 52/53 — startTurn now returns the
+  // multi-turn history (excluding streaming rows) AND the conversation's pin
+  // columns so the gateway can thread both into the SDK request without a
+  // second query.
+  describe('startTurn — multi-turn history + pin pass-through', () => {
+    it('returns history in chronological order, excludes streaming rows, includes the just-persisted user message', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+
+      // Pre-existing messages: one complete user turn + one streaming
+      // assistant row (left over from a crashed prior turn — should be
+      // EXCLUDED from history because it has no useful content yet).
+      const earlierUserId = randomUUID();
+      prisma.messages.push({
+        id: earlierUserId,
+        conversationId,
+        userId,
+        role: 'user',
+        content: 'older user message',
+        status: 'complete',
+        createdAt: new Date(Date.now() - 2_000),
+        completedAt: new Date(Date.now() - 1_900),
+      });
+      prisma.messages.push({
+        id: randomUUID(),
+        conversationId,
+        userId,
+        role: 'assistant',
+        content: 'streaming artifact',
+        status: 'streaming',
+        createdAt: new Date(Date.now() - 1_000),
+        completedAt: null,
+      });
+
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'next user message',
+      });
+      expect(result.history).toBeDefined();
+      const contents = result.history!.map((m) => m.content);
+      // Streaming row dropped; older complete + new user present.
+      expect(contents).toContain('older user message');
+      expect(contents).toContain('next user message');
+      expect(contents).not.toContain('streaming artifact');
+      // Chronological — older first.
+      expect(contents.indexOf('older user message')).toBeLessThan(
+        contents.indexOf('next user message'),
+      );
+    });
+
+    it('returns the conversation pin pair on the result so the gateway can thread it into the SDK request', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const userId = randomUUID();
+      const conversationId = randomUUID();
+      prisma.users.push({ id: userId, email: 'u@t', passwordHash: 'x', createdAt: new Date() });
+      (prisma.conversations as unknown as Array<Record<string, unknown>>).push({
+        id: conversationId,
+        userId,
+        title: 'c',
+        createdAt: new Date(),
+        lastMessageAt: null,
+        pinnedProvider: 'anthropic',
+        pinnedModel: 'claude-haiku-4-5',
+      });
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'hi',
+      });
+      expect(result.pinnedProvider).toBe('anthropic');
+      expect(result.pinnedModel).toBe('claude-haiku-4-5');
+    });
+
+    it('returns null pin pair when the conversation is unpinned', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const result = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'hi',
+      });
+      expect(result.pinnedProvider).toBeNull();
+      expect(result.pinnedModel).toBeNull();
+    });
+  });
+
   describe('failTurn', () => {
     it('sets status=failed, flushes partial content, and persists errorCode + status into the placeholder inferences row', async () => {
       const prisma = createInMemoryPrisma();

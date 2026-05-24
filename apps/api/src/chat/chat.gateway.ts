@@ -23,6 +23,7 @@
 //   - handleDisconnect: call .onDisconnect() on every active orchestrator
 //     for that connection. Release per-message seq counters.
 import {
+  Inject,
   Logger,
   type OnModuleInit,
 } from '@nestjs/common';
@@ -36,13 +37,17 @@ import type { WebSocket, RawData } from 'ws';
 import { ChatService } from './chat.service';
 import { SeqCounterRegistry } from './seq-counter';
 import { StreamOrchestrator } from './stream-orchestrator';
+import { ContextMeterService } from './context-meter.service';
 import { resolveWsUser } from '../auth/ws-session';
 import { AuthService } from '../auth/auth.service';
 import { ConversationsRepository } from '../conversations/conversations.repository';
 import { WS_PATH, WsFrameInboundSchema, type WsFrameOutbound } from '@argus/contracts';
-import { chat as sdkChat } from '@argus/sdk';
+import type { ChatStreamRequest } from '@argus/sdk';
 import { captureApiError, withWsScope } from '../observability/sentry';
 import { buildEndFrame, buildErrorFrame } from './frame-builder';
+import { SDK_CATALOG, type SdkCatalogAccessor } from '../common/sdk-catalog.provider';
+import { SDK_CHAT_STREAM, type SdkChatStreamFn } from '../common/sdk-chat.provider';
+import { defaultContextBudget } from '../common/token-heuristic';
 
 interface ChatClient extends WebSocket {
   data?: ChatClientData;
@@ -60,15 +65,54 @@ const WS_INTERNAL_ERROR = 1011;
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   private readonly logger = new Logger(ChatGateway.name);
 
+  // chat-context-and-ux-polish LLD Task 65 — cached pre-flight provider
+  // guess (the router priority head's `isConfigured()` name). Threaded onto
+  // every SDK request as `guessProvider` so the span can compute the
+  // guess/commit divergence (LLD Task 34). Computed once at module init;
+  // a deployment that adds/removes provider keys at runtime would need to
+  // restart to pick up the new head, which matches the existing behavior of
+  // the router and is consistent with operator expectations.
+  private cachedGuessProvider: string | null = null;
+
   constructor(
     private readonly chatService: ChatService,
     private readonly seqRegistry: SeqCounterRegistry,
     private readonly auth: AuthService,
     private readonly conversations: ConversationsRepository,
+    private readonly contextMeter: ContextMeterService,
+    @Inject(SDK_CATALOG) private readonly catalog: SdkCatalogAccessor,
+    @Inject(SDK_CHAT_STREAM) private readonly sdkStream: SdkChatStreamFn,
   ) {}
 
   onModuleInit(): void {
-    this.logger.log(`ChatGateway ready — WS path=${WS_PATH}`);
+    this.cachedGuessProvider = this.deriveGuessProvider();
+    this.logger.log(
+      `ChatGateway ready — WS path=${WS_PATH}, guessProvider=${this.cachedGuessProvider ?? '<none>'}`,
+    );
+  }
+
+  /**
+   * Resolve the gateway's pre-flight provider guess: the first configured
+   * adapter from the router's PROVIDER_ORDER head (or `mock` when
+   * MOCK_PROVIDER=true and no real adapter is configured). Reads from the
+   * SDK catalog accessor so tests can override the answer via the
+   * SDK_CATALOG token without touching env.
+   */
+  private deriveGuessProvider(): string | null {
+    const order = parseProviderOrder(process.env.PROVIDER_ORDER) ?? [
+      'openai',
+      'anthropic',
+      'gemini',
+    ];
+    const configured = this.catalog.listConfiguredProviders();
+    if (configured.length === 0) return null;
+    const configuredNames = new Set(configured.map((c) => c.provider));
+    for (const name of order) {
+      if (configuredNames.has(name)) return name;
+    }
+    // No real provider in the order matched the configured set. Fall back
+    // to the first configured entry — typically mock when MOCK_PROVIDER=true.
+    return configured[0]!.provider;
   }
 
   async handleConnection(client: ChatClient, req: IncomingMessage): Promise<void> {
@@ -211,8 +255,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       conversationId = frame.conversationId;
     }
 
+    // chat-context-and-ux-polish LLD Task 53 — startTurn now returns the
+    // multi-turn history (oldest-first, streaming rows excluded) AND the
+    // conversation's pin pair, so the gateway can build the SDK request
+    // without a second round-trip.
+    let startResult;
     try {
-      await this.chatService.startTurn({
+      startResult = await this.chatService.startTurn({
         userId: data.userId,
         conversationId,
         userMessageContent: frame.content,
@@ -234,14 +283,41 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
     const abort = new AbortController();
     const turnIndex = await this.computeTurnIndex(conversationId);
-    const sdkStream = sdkChat.stream({
-      messages: [{ role: 'user', content: frame.content }],
+    // chat-context-and-ux-polish LLD Tasks 61/63/65 — build the SDK
+    // request with pin (when both columns set), effective budget +
+    // context window cap (catalog-derived), and the cached guess.
+    const pin =
+      startResult.pinnedProvider && startResult.pinnedModel
+        ? { provider: startResult.pinnedProvider, model: startResult.pinnedModel }
+        : undefined;
+    const configuredDefault = defaultContextBudget();
+    const effectiveBudget = this.catalog.getEffectiveBudget(configuredDefault, pin);
+    // Window cap is the pinned model's contextWindow (or absent when no pin
+    // / unknown pin). When absent the gateway omits the hint so the span
+    // attr `llm.context_window_cap` simply isn't set rather than stamped
+    // with a misleading zero.
+    let contextWindowCap: number | undefined;
+    if (pin) {
+      const entry = this.catalog.getCatalogEntry(pin.provider, pin.model);
+      if (entry) contextWindowCap = entry.contextWindow;
+    }
+    const sdkRequest: ChatStreamRequest = {
+      // LLD Task 53: thread the full history (already includes the just-
+      // inserted user message). Streaming rows were excluded server-side.
+      messages: startResult.history ?? [{ role: 'user', content: frame.content }],
       conversationId,
       turnIndex,
       userId: data.userId,
       messageId: assistantMessageId,
       signal: abort.signal,
-    });
+      ...(pin ? { pin } : {}),
+      effectiveBudget,
+      ...(contextWindowCap !== undefined ? { contextWindowCap } : {}),
+      ...(this.cachedGuessProvider !== null
+        ? { guessProvider: this.cachedGuessProvider }
+        : {}),
+    };
+    const sdkStream = this.sdkStream(sdkRequest);
 
     // chat-context-and-ux-polish LLD Task 67 — the legacy mock/mock-1 literals
     // are gone. The SDK's `commit` chunk (LLD Preamble §1) is what the
@@ -249,6 +325,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     const orchestrator = new StreamOrchestrator(this.chatService, this.seqRegistry, {
       messageId: assistantMessageId,
       conversationId,
+      // LLD Task 57 — pass the meter + userId so the orchestrator can
+      // populate the `end` frame's tokensUsed/tokensBudget on the complete
+      // terminal.
+      userId: data.userId,
+      meter: this.contextMeter,
       sdkStream,
       abort,
       emit: (out) => this.send(client, out),
@@ -337,4 +418,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 function defaultTitleFor(content: string): string {
   const trimmed = content.trim().replace(/\s+/g, ' ');
   return trimmed.length <= 60 ? trimmed : trimmed.slice(0, 57) + '...';
+}
+
+/**
+ * Parse PROVIDER_ORDER env into the canonical name list. Mirrors the
+ * router's `envOrder()` so the gateway's pre-flight guess follows the same
+ * priority head the router uses for failover. Returns undefined on missing
+ * or empty env so the caller can apply its own default.
+ */
+function parseProviderOrder(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw.split(',').map((s) => s.trim().toLowerCase());
+  const valid: string[] = [];
+  for (const p of parts) {
+    if (p === 'openai' || p === 'anthropic' || p === 'gemini' || p === 'mock') {
+      valid.push(p);
+    }
+  }
+  return valid.length > 0 ? valid : undefined;
 }

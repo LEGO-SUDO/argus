@@ -41,9 +41,22 @@ export interface StartTurnInput {
   assistantMessageId?: string;
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
 export interface StartTurnResult {
   userMessageId: string;
   assistantMessageId: string;
+  // chat-context-and-ux-polish LLD Task 53 — multi-turn history (oldest
+  // first, streaming rows excluded) the gateway threads into the SDK
+  // request's `messages` field so the model actually sees prior turns.
+  history?: ChatHistoryMessage[];
+  // LLD Task 53 — pin pair from the conversation row, surfaced here so the
+  // gateway can build the SDK request's `pin` without a second query.
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 }
 
 /**
@@ -134,7 +147,38 @@ export class ChatService {
       });
     });
 
-    return { userMessageId, assistantMessageId };
+    // chat-context-and-ux-polish LLD Task 53 — load the multi-turn history
+    // AFTER the user-message insert so the new user message is included
+    // (the SDK request needs it). Streaming-status rows are excluded — the
+    // assistant placeholder we just inserted is still streaming, and any
+    // crashed prior assistant row would otherwise leak empty/partial
+    // content into the next prompt. Order: chronological (oldest first).
+    const historyRows = (await this.prisma.db.message.findMany({
+      where: {
+        conversationId: input.conversationId,
+        userId: input.userId,
+        status: { in: ['complete', 'canceled', 'failed'] },
+      },
+      orderBy: { createdAt: 'asc' },
+    })) as Array<{ role: string; content: string }>;
+    const history: ChatHistoryMessage[] = historyRows.map((m) => ({
+      role: m.role as 'user' | 'assistant' | 'system',
+      content: m.content,
+    }));
+
+    // The conversation row was already authz-checked above; re-read it for
+    // the pin pair so the gateway doesn't need a second query.
+    const pinned = (await this.prisma.db.conversation.findFirst({
+      where: { id: input.conversationId, userId: input.userId },
+    })) as { pinnedProvider?: string | null; pinnedModel?: string | null } | null;
+
+    return {
+      userMessageId,
+      assistantMessageId,
+      history,
+      pinnedProvider: pinned?.pinnedProvider ?? null,
+      pinnedModel: pinned?.pinnedModel ?? null,
+    };
   }
 
   async completeTurn(messageId: string, content: string): Promise<void> {

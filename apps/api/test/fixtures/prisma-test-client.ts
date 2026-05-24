@@ -102,6 +102,11 @@ interface Where {
   messageId?: ScalarOrFilter;
   email?: ScalarOrFilter;
   tokenHash?: ScalarOrFilter;
+  // chat-context-and-ux-polish LLD Task 53 — ChatService.startTurn filters
+  // history by `status: { in: ['complete', 'canceled', 'failed'] }` to drop
+  // streaming rows. Mirror the operator surface here so the InMemoryPrisma
+  // matches what Prisma's runtime accepts.
+  status?: ScalarOrFilter;
   AND?: Where[];
 }
 

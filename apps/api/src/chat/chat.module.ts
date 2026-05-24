@@ -5,6 +5,7 @@ import { SeqCounterRegistry } from './seq-counter';
 import { ContextMeterService } from './context-meter.service';
 import { PrismaService } from '../common/prisma.service';
 import { SdkCatalogProvider } from '../common/sdk-catalog.provider';
+import { SdkChatStreamProvider } from '../common/sdk-chat.provider';
 import { AuthModule } from '../auth/auth.module';
 import { ConversationsModule } from '../conversations/conversations.module';
 
@@ -19,6 +20,9 @@ import { ConversationsModule } from '../conversations/conversations.module';
     // chat-context-and-ux-polish LLD Task 55 — Nest provider for the SDK
     // catalog accessor. Tests override via the same `SDK_CATALOG` token.
     SdkCatalogProvider,
+    // chat-context-and-ux-polish LLD Task 60 — Nest provider for the SDK
+    // `chat.stream` entry point so tests can capture the request shape.
+    SdkChatStreamProvider,
   ],
   // Export ContextMeterService so the conversations controller (LLD Task 81)
   // can consume it without importing chat-internal collaborators.
