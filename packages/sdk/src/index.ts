@@ -30,6 +30,14 @@ export interface ChatMessage {
 
 /** Single streaming chunk yielded by `chat.stream`. */
 export type ChatStreamChunk =
+  | {
+      // chat-context-and-ux-polish LLD Task 28 — synthetic chunk the router
+      // emits exactly once, immediately before the FIRST non-empty token,
+      // carrying the same provider/model payload `done` carries. The
+      // orchestrator turns this into the WS `metadata` frame (Preamble §1).
+      type: 'commit';
+      providerMeta: ProviderMeta;
+    }
   | { type: 'token'; content: string }
   | { type: 'done'; providerMeta: ProviderMeta };
 
@@ -40,6 +48,12 @@ export interface ProviderMeta {
   completionTokens?: number;
 }
 
+/** Pin descriptor on a chat request. Both fields move together per the picker's coupling rule. */
+export interface ChatStreamPin {
+  provider: string;
+  model: string;
+}
+
 export interface ChatStreamRequest {
   messages: ChatMessage[];
   conversationId: string;
@@ -48,6 +62,16 @@ export interface ChatStreamRequest {
   messageId: string;
   /** Caller-controlled cancellation. Aborting must stop the iterator promptly. */
   signal?: AbortSignal;
+  // chat-context-and-ux-polish LLD Task 32 — optional pin. When present the
+  // router uses the override branch (one adapter only, no failover); when
+  // absent the existing failover loop runs unchanged.
+  pin?: ChatStreamPin;
+  // chat-context-and-ux-polish LLD Task 34 — optional observability hints
+  // the gateway threads onto each request so the SDK span can carry them.
+  // The SDK never DERIVES these — it only stamps them onto the span.
+  effectiveBudget?: number;
+  contextWindowCap?: number;
+  guessProvider?: string;
 }
 
 /**
@@ -76,6 +100,24 @@ export class ProviderError extends Error {
 // reaching into the providers/ subtree.
 export type { ProviderName } from './providers/types';
 
+// chat-context-and-ux-polish LLD Task 26 — picker catalog accessor.
+// `@internal`: consumed by apps/api's Nest `SDK_CATALOG` provider token
+// (ProvidersController + ContextMeterService + ConversationsController),
+// not part of the durable public SDK surface promised to external callers.
+export {
+  listConfiguredProviders,
+  type ConfiguredProviderEntry,
+  type ListConfiguredProvidersOptions,
+} from './providers/list';
+// LLD Tasks 15-18 — catalog + budget accessors used by ContextMeterService
+// and the gateway's effective-budget computation.
+export {
+  getCatalogEntry,
+  getEffectiveBudget,
+  type CatalogEntryReadout,
+  type PinDescriptor,
+} from './cost';
+
 // ---- Public surface --------------------------------------------------------
 
 /**
@@ -100,7 +142,15 @@ export const chat = {
 
     try {
       for await (const chunk of defaultRouter.stream(req)) {
-        if (chunk.type === 'token') {
+        if (chunk.type === 'commit') {
+          // Forward the synthetic commit chunk so the orchestrator can mint
+          // the WS `metadata` frame. Also stash the committed provider/model
+          // so a later cancel/fail still records the right adapter on the
+          // span instead of `unknown`.
+          provider = (chunk.providerMeta.provider as ProviderName) ?? 'unknown';
+          model = chunk.providerMeta.model;
+          yield chunk;
+        } else if (chunk.type === 'token') {
           accumulated += chunk.content;
           yield chunk;
         } else if (chunk.type === 'done') {

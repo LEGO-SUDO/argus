@@ -27,6 +27,13 @@ export class MockProvider implements ProviderAdapter {
     return true;
   }
 
+  // LLD Task 20 — the picker REST endpoint enumerates the catalog through
+  // this accessor. Mock advertises a single model that matches the pricebook
+  // entry (mock:mock-1). Keep this in lockstep with cost.ts PRICEBOOK keys.
+  listModels(): string[] {
+    return ['mock-1'];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
     const override = process.env.MOCK_RESPONSE;
     const text = override !== undefined && override.length > 0

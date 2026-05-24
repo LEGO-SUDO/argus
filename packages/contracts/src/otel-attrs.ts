@@ -25,6 +25,18 @@ export const OTEL_ATTRS = {
   USER_ID: 'user.id',
   MESSAGE_ID: 'message.id',
   TURN_INDEX: 'turn.index',
+  // chat-context-and-ux-polish LLD Task 34 — context meter + pin telemetry.
+  // The gateway threads `effectiveBudget` + `contextWindowCap` onto each SDK
+  // request as observability hints; the span stamps them. `pinned_failure`
+  // is true iff the request failed with the override-branch error code
+  // (`pinned_provider_unavailable`). `guess_commit_divergent` compares the
+  // gateway's pre-flight provider guess (the router head's name) to the
+  // adapter that actually committed; true when they differ, false when they
+  // match.
+  LLM_CONTEXT_BUDGET_EFFECTIVE: 'llm.context_budget_effective',
+  LLM_CONTEXT_WINDOW_CAP: 'llm.context_window_cap',
+  LLM_PINNED_FAILURE: 'llm.pinned_failure',
+  LLM_GUESS_COMMIT_DIVERGENT: 'llm.guess_commit_divergent',
 } as const;
 
 export const SPAN_EVENT_NAMES = {

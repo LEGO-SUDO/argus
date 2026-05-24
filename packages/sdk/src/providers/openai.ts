@@ -49,6 +49,13 @@ export class OpenAIProvider implements ProviderAdapter {
     return typeof key === 'string' && key.length > 0;
   }
 
+  // LLD Task 21 — model ids the OpenAI adapter advertises. Must stay in sync
+  // with the openai:* entries in cost.ts PRICEBOOK; the catalog accessor
+  // (getCatalogEntry) joins on (provider, model) to hydrate price + window.
+  listModels(): string[] {
+    return ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
     const model = this.opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_MODEL;
     const client = this.opts.client ?? this.buildClient();

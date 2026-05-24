@@ -56,15 +56,23 @@ export interface LlmSpan {
  */
 export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
   const tracer = trace.getTracer(TRACER_NAME);
-  const opts: SpanOptions = {
-    attributes: {
-      [OTEL_ATTRS.CONVERSATION_ID]: req.conversationId,
-      [OTEL_ATTRS.USER_ID]: req.userId,
-      [OTEL_ATTRS.MESSAGE_ID]: req.messageId,
-      [OTEL_ATTRS.TURN_INDEX]: req.turnIndex,
-      [OTEL_ATTRS.LLM_STATUS]: 'streaming' satisfies LlmStatus,
-    },
+  // Seed the budget/cap attrs at span start so even a failed-before-first-
+  // token request carries them (LLD Task 34 + Preamble §3 — pre-token
+  // failures are observable in Jaeger without the gateway re-emitting).
+  const seedAttrs: Record<string, string | number | boolean> = {
+    [OTEL_ATTRS.CONVERSATION_ID]: req.conversationId,
+    [OTEL_ATTRS.USER_ID]: req.userId,
+    [OTEL_ATTRS.MESSAGE_ID]: req.messageId,
+    [OTEL_ATTRS.TURN_INDEX]: req.turnIndex,
+    [OTEL_ATTRS.LLM_STATUS]: 'streaming' satisfies LlmStatus,
   };
+  if (typeof req.effectiveBudget === 'number') {
+    seedAttrs[OTEL_ATTRS.LLM_CONTEXT_BUDGET_EFFECTIVE] = req.effectiveBudget;
+  }
+  if (typeof req.contextWindowCap === 'number') {
+    seedAttrs[OTEL_ATTRS.LLM_CONTEXT_WINDOW_CAP] = req.contextWindowCap;
+  }
+  const opts: SpanOptions = { attributes: seedAttrs };
 
   // startActiveSpan binds the span to the current context — any child spans
   // the provider SDK happens to start (e.g. the HTTP client's own
@@ -73,6 +81,10 @@ export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
   tracer.startActiveSpan(SPAN_NAME, opts, otelContext.active(), (s) => {
     span = s;
   });
+
+  // Capture the pre-flight guess once at span-start so the divergence
+  // computation on succeed() doesn't depend on a still-mutable closure.
+  const guessProvider = typeof req.guessProvider === 'string' ? req.guessProvider : null;
 
   // Emit `llm.input` immediately so even a failed-before-first-token request
   // has its prompt captured in the trace.
@@ -105,6 +117,14 @@ export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
       span.setAttribute(OTEL_ATTRS.LLM_PROMPT_COST_USD_MICROS, promptMicros);
       span.setAttribute(OTEL_ATTRS.LLM_COMPLETION_COST_USD_MICROS, completionMicros);
       span.setAttribute(OTEL_ATTRS.LLM_STATUS, 'ok' satisfies LlmStatus);
+      // LLD Task 34: divergence only computed when a guess was provided —
+      // emitting `false` on every span without a guess would muddy the metric.
+      if (guessProvider !== null) {
+        span.setAttribute(
+          OTEL_ATTRS.LLM_GUESS_COMMIT_DIVERGENT,
+          guessProvider !== meta.provider,
+        );
+      }
       addBodyEvent(span, SPAN_EVENT_NAMES.LLM_OUTPUT, outputContent);
       span.setStatus({ code: SpanStatusCode.OK });
       endOnce();
@@ -124,6 +144,14 @@ export function startLlmSpan(req: ChatStreamRequest): LlmSpan {
       span.setAttribute(OTEL_ATTRS.LLM_MODEL, model);
       span.setAttribute(OTEL_ATTRS.LLM_STATUS, 'failed' satisfies LlmStatus);
       span.setAttribute(OTEL_ATTRS.LLM_ERROR_CODE, errorCode);
+      // LLD Task 34: pinned_failure default false; true only when the error
+      // code matches the override-branch sentinel from router.ts. Stamping
+      // false on every failure (rather than omitting when not pinned) gives
+      // operators a clean boolean to filter Jaeger searches on.
+      span.setAttribute(
+        OTEL_ATTRS.LLM_PINNED_FAILURE,
+        errorCode === 'pinned_provider_unavailable',
+      );
       addBodyEvent(span, SPAN_EVENT_NAMES.LLM_OUTPUT, partialOutput);
       if (err instanceof Error) {
         span.recordException(err);

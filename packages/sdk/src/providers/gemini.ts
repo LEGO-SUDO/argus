@@ -60,6 +60,18 @@ export class GeminiAdapter implements ProviderAdapter {
     return Boolean(this.opts.apiKey ?? process.env.GOOGLE_API_KEY);
   }
 
+  // LLD Task 23 — Gemini model ids advertised to the picker. Matches the
+  // gemini:* keys in cost.ts PRICEBOOK (3-flash-preview, 2.0-flash-exp,
+  // 1.5-flash, 1.5-pro).
+  listModels(): string[] {
+    return [
+      'gemini-3-flash-preview',
+      'gemini-2.0-flash-exp',
+      'gemini-1.5-flash',
+      'gemini-1.5-pro',
+    ];
+  }
+
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
     const apiKey = this.opts.apiKey ?? process.env.GOOGLE_API_KEY;
     if (!apiKey) {
