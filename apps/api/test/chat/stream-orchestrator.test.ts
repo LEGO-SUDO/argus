@@ -87,8 +87,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: tokenStream(['a', 'b', 'c']),
         abort,
         emit,
@@ -122,8 +120,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: stream,
         abort,
         emit,
@@ -165,8 +161,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: stream,
         abort,
         emit,
@@ -214,8 +208,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: tightStream,
         abort,
         emit,
@@ -261,8 +253,6 @@ describe('StreamOrchestrator', () => {
       const o = new StreamOrchestrator(svc, seqRegistry, {
         messageId,
         conversationId,
-        provider: 'mock',
-        model: 'mock-1',
         sdkStream: errStream,
         abort,
         emit,

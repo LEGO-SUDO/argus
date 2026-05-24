@@ -32,8 +32,11 @@ export type Emit = (frame: WsFrameOutbound) => void;
 export interface RunStreamInput {
   messageId: string;
   conversationId: string;
-  provider: string;
-  model: string;
+  // chat-context-and-ux-polish LLD Task 41 — provider/model removed from the
+  // orchestrator input shape. The SDK now ships a `commit` chunk before the
+  // first token (LLD Preamble §1) and the orchestrator emits a `metadata`
+  // frame from that chunk. The gateway no longer threads literal mock-1
+  // labels into the start frame.
   sdkStream: AsyncIterable<ChatStreamChunk>;
   /** Surface the underlying AbortController so we can stop the SDK iterator. */
   abort: AbortController;
@@ -60,14 +63,13 @@ export class StreamOrchestrator {
   async runStream(): Promise<void> {
     const counter = this.seqRegistry.for(this.input.messageId);
 
-    // Start frame — seq 0.
+    // Start frame — seq 0, identity-only (LLD Task 2/37). The metadata frame
+    // (LLD Task 4/41) lands at seq=1 after the SDK commits to a provider.
     counter.next(); // consume 0
     this.emit(
       buildStartFrame({
         messageId: this.input.messageId,
         conversationId: this.input.conversationId,
-        provider: this.input.provider,
-        model: this.input.model,
       }),
     );
 

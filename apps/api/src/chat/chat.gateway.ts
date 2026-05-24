@@ -243,11 +243,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       signal: abort.signal,
     });
 
+    // chat-context-and-ux-polish LLD Task 67 — the legacy mock/mock-1 literals
+    // are gone. The SDK's `commit` chunk (LLD Preamble §1) is what the
+    // orchestrator turns into the WS `metadata` frame; no gateway-side guess.
     const orchestrator = new StreamOrchestrator(this.chatService, this.seqRegistry, {
       messageId: assistantMessageId,
       conversationId,
-      provider: 'mock', // Phase A stub; real SDK populates this in the start frame later
-      model: 'mock-1',
       sdkStream,
       abort,
       emit: (out) => this.send(client, out),

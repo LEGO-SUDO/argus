@@ -7,22 +7,30 @@
 //     - cancel    request server stop streaming an in-flight message
 //
 //   outbound (server → client):
-//     - start         server has accepted the turn, message_id minted, provider chosen
-//     - token         next chunk of assistant content
-//     - end           terminal frame; carries final status (complete | canceled | failed)
+//     - start         identity-only: messageId, conversationId, seq=0 (no provider/model)
+//     - metadata      seq=1; carries `providerMeta { provider, model, ... }`
+//                     EXACTLY ONCE per turn, on the SDK `commit` chunk
+//                     (chat-context-and-ux-polish backbone LLD Task 4/6,
+//                      Preamble §1: commit is the final provider+model,
+//                      Preamble §2: metadata is exactly-once, sourced from commit).
+//     - token         next chunk of assistant content (seq 2..N)
+//     - end           terminal frame; status (complete | canceled | failed);
+//                     optional `tokensUsed` + `tokensBudget` populated only when
+//                     `status: 'complete'` per HLD D5; orchestrator gates this
+//                     (Tasks 7/8/57/59) — schema only declares the optional shape.
 //     - error         provider/server-side error (always followed by an `end`)
 //     - cancel-ack    acknowledges receipt of a cancel request
 //
-// All outbound frames carry `seq` — strictly monotonic per message_id starting
-// at 0 (start) → 1..N (token) → terminal end/cancel-ack/error.
+// Per-message seq invariant after this backbone (Task 4):
+//   start@0 → metadata@1 → token@2..N → terminal (end/error/cancel-ack)
+//
+// Pre-token failure path (Preamble §3): start@0 → error → end(failed).
+// No metadata frame ever leaks before the error.
 import { z } from 'zod';
 
 // Path the @WebSocketGateway is mounted on. Web client and any wscat smoke
 // test must dial this exact path.
 export const WS_PATH = '/ws/chat';
-
-// Provider + model values are free-text at the wire boundary — the gateway
-// does not constrain which providers the SDK supports.
 
 // ---------------------------------------------------------------------------
 // Inbound (client → server)
@@ -59,21 +67,54 @@ export type WsFrameInbound = z.infer<typeof WsFrameInboundSchema>;
 // Outbound (server → client)
 // ---------------------------------------------------------------------------
 
-export const WsStartFrameSchema = z.object({
-  type: z.literal('start'),
-  messageId: z.string().uuid(),
-  conversationId: z.string().uuid(),
-  provider: z.string(),
-  model: z.string(),
-  // Always 0 for start frames.
-  seq: z.literal(0),
-});
+// .strict() so the contract test (Task 1) can assert provider/model rejection.
+// Identity-only after the backbone — provider/model migrated to the metadata
+// frame below (Task 2 + 4).
+export const WsStartFrameSchema = z
+  .object({
+    type: z.literal('start'),
+    messageId: z.string().uuid(),
+    conversationId: z.string().uuid(),
+    // Always 0 for start frames.
+    seq: z.literal(0),
+  })
+  .strict();
 export type WsStartFrame = z.infer<typeof WsStartFrameSchema>;
+
+// Inner `providerMeta` shape. `.passthrough()` (per LLD Codex-vagueness fix:
+// "Zod open-shape policy for providerMeta: use .passthrough()") so the
+// `commit`-chunk's optional fields (promptTokens, completionTokens, etc.)
+// land in the parsed object without forcing a contract revision each time
+// the SDK adds a sibling key.
+export const WsMetadataProviderMetaSchema = z
+  .object({
+    provider: z.string(),
+    model: z.string(),
+  })
+  .passthrough();
+export type WsMetadataProviderMeta = z.infer<typeof WsMetadataProviderMetaSchema>;
+
+// Metadata frame — emits EXACTLY ONCE per turn at seq=1, sourced from the SDK
+// `commit` chunk (LLD Preamble §2). `seq` is pinned to the literal 1 (LLD
+// Task 5/6) so the per-message frame ordering stays a property the schema
+// enforces, not just a runtime invariant.
+export const WsMetadataFrameSchema = z.object({
+  type: z.literal('metadata'),
+  messageId: z.string().uuid(),
+  // chat-context-and-ux-polish LLD Task 6: literal 1.
+  seq: z.literal(1),
+  providerMeta: WsMetadataProviderMetaSchema,
+});
+export type WsMetadataFrame = z.infer<typeof WsMetadataFrameSchema>;
 
 export const WsTokenFrameSchema = z.object({
   type: z.literal('token'),
   messageId: z.string().uuid(),
-  // Monotonic, strictly increasing from 1.
+  // Monotonic, strictly increasing from 1. Token frames start at seq=2 in the
+  // backbone since metadata claims seq=1, but the schema's lower bound stays
+  // at 1 to keep backward-compat (pre-metadata clients shouldn't break on a
+  // theoretical no-metadata turn — orchestrator enforces start→metadata→token
+  // ordering at runtime).
   seq: z.number().int().min(1),
   content: z.string(),
 });
@@ -88,6 +129,12 @@ export const WsEndFrameSchema = z.object({
   // Terminal seq — greater than every token seq emitted for this message.
   seq: z.number().int().min(1),
   status: WsEndStatusSchema,
+  // chat-context-and-ux-polish LLD Task 7/8: optional non-negative integer
+  // context fields. Populated only when `status: 'complete'` per HLD D5;
+  // orchestrator-side enforcement lives in apps/api (Tasks 57/59 gate the
+  // meter call to the complete terminal path).
+  tokensUsed: z.number().int().nonnegative().optional(),
+  tokensBudget: z.number().int().nonnegative().optional(),
 });
 export type WsEndFrame = z.infer<typeof WsEndFrameSchema>;
 
@@ -107,6 +154,7 @@ export type WsCancelAckFrame = z.infer<typeof WsCancelAckFrameSchema>;
 
 export const WsFrameOutboundSchema = z.discriminatedUnion('type', [
   WsStartFrameSchema,
+  WsMetadataFrameSchema,
   WsTokenFrameSchema,
   WsEndFrameSchema,
   WsErrorFrameSchema,
