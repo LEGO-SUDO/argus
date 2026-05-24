@@ -10,12 +10,129 @@ import {
   WsStartFrameSchema,
   WsFrameOutboundSchema,
   WsEndFrameSchema,
+  WsSendFrameSchema,
+  WsFrameInboundSchema,
 } from '../ws';
 import type { WsEndStatus } from '../ws';
 import { randomUUID } from 'crypto';
 
 const messageId = randomUUID();
 const conversationId = randomUUID();
+
+// chat-context-and-ux-polish (integration review — first-turn pin race). The
+// send frame can OPTIONALLY carry a pin so the FIRST turn of a brand-new
+// conversation honors the picker selection (the PATCH that persists the pin
+// only lands after the `start` frame mints the conversation, too late for
+// turn 1). Coupling mirrors UpdateConversationRequestSchema: both pin fields
+// present-as-non-empty-strings together, or both omitted. Null is not
+// meaningful on send (a send either carries a pin or doesn't — omit both for
+// Auto/failover).
+describe('WsSendFrameSchema — optional pin coupling (first-turn pin race)', () => {
+  it('parses a send frame with NO pin (Auto — backward compat)', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('parses a send frame on a new conversation (null conversationId) with both pin fields set', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('parses a send frame on an existing conversation (uuid) with both pin fields set', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: randomUUID(),
+      content: 'hi',
+      pinnedProvider: 'anthropic',
+      pinnedModel: 'claude-haiku-4-5',
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('rejects when only pinnedProvider is present (coupling violation)', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+    });
+    expect(out.success).toBe(false);
+  });
+
+  it('rejects when only pinnedModel is present (coupling violation)', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    expect(out.success).toBe(false);
+  });
+
+  it('rejects an empty-string pinnedProvider', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: '',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    expect(out.success).toBe(false);
+  });
+
+  it('rejects an empty-string pinnedModel', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+      pinnedModel: '',
+    });
+    expect(out.success).toBe(false);
+  });
+
+  it('rejects a null pinnedProvider (null is not meaningful on send — omit both for Auto)', () => {
+    const out = WsSendFrameSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: null,
+      pinnedModel: null,
+    });
+    expect(out.success).toBe(false);
+  });
+
+  it('still parses a pinned send frame through the inbound discriminated union', () => {
+    const out = WsFrameInboundSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    expect(out.success).toBe(true);
+  });
+
+  it('rejects an asymmetric pinned send frame through the inbound discriminated union', () => {
+    const out = WsFrameInboundSchema.safeParse({
+      type: 'send',
+      conversationId: null,
+      content: 'hi',
+      pinnedProvider: 'openai',
+    });
+    expect(out.success).toBe(false);
+  });
+});
 
 describe('WsStartFrameSchema — identity only (Tasks 1/2)', () => {
   it('parses a minimal identity payload', () => {

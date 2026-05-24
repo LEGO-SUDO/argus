@@ -36,7 +36,48 @@ export const WS_PATH = '/ws/chat';
 // Inbound (client → server)
 // ---------------------------------------------------------------------------
 
-export const WsSendFrameSchema = z.object({
+// chat-context-and-ux-polish (integration review — first-turn pin race).
+// Optional pin fields on the send frame so the FIRST turn of a brand-new
+// conversation can honor the picker selection. Without this, the frontend
+// holds the pin and PATCHes /conversations/:id only AFTER the `start` frame
+// mints the conversation — but the gateway already read the (null) persisted
+// pin and streamed with Auto/failover, so the pin only takes effect from turn
+// 2. Carrying the pin on the send frame closes that race.
+//
+// Coupling rule mirrors UpdateConversationRequestSchema (conversations.ts):
+// pinnedProvider + pinnedModel must move together — both present as non-empty
+// strings (carry a pin) OR both omitted (Auto). Unlike the PATCH body, NULL is
+// NOT accepted here: a send either carries a pin or it doesn't, so "Auto" is
+// expressed by omitting both, never by sending null. Empty strings are
+// rejected (a footgun — `""` is not a real model id).
+const SendPinFieldSchema = z.string().min(1).optional();
+
+// Shared coupling predicate so BOTH the standalone `WsSendFrameSchema` AND the
+// inbound discriminated-union variant enforce it. (Zod 3's
+// `z.discriminatedUnion` rejects a refined object as a member — `ZodEffects`
+// has no `.shape` — so the union member stays the raw object below and the
+// union is re-refined. Same shape as the end-frame handling further down.)
+const sendPinCouplingValid = (data: {
+  pinnedProvider?: string;
+  pinnedModel?: string;
+}): boolean => {
+  // Both omitted → fine (Auto). Both present → fine (carry a pin).
+  // Exactly one present → coupling violation. (Empty strings already fail the
+  // field-level .min(1); a present-but-empty value can't reach here.)
+  const hasProvider = data.pinnedProvider !== undefined;
+  const hasModel = data.pinnedModel !== undefined;
+  return hasProvider === hasModel;
+};
+
+const SEND_PIN_COUPLING_REFINE_OPTS: { message: string; path: (string | number)[] } = {
+  message:
+    'pinnedProvider and pinnedModel must move together (both non-empty strings, or both omitted)',
+  path: ['pinnedProvider'],
+};
+
+// Raw object — used as the inbound discriminated-union member (must stay a
+// ZodObject so the union can discriminate on `type`).
+const WsSendFrameObjectSchema = z.object({
   type: z.literal('send'),
   // Null for the FIRST turn of a brand-new conversation — the gateway mints
   // both the conversation row and `message_id`, then surfaces the freshly
@@ -47,8 +88,20 @@ export const WsSendFrameSchema = z.object({
   // The user-authored content for this turn. The server mints `message_id`
   // — client never assigns one (HLD D1 — gateway is sole minter).
   content: z.string().min(1).max(64_000),
+  // Optional pin for THIS turn (see block comment above). When present, the
+  // gateway validates it against the live catalog, uses it as the turn's SDK
+  // override, and persists it onto the conversation row so turn 2+ flow
+  // through the existing persisted-pin path.
+  pinnedProvider: SendPinFieldSchema,
+  pinnedModel: SendPinFieldSchema,
 });
-export type WsSendFrame = z.infer<typeof WsSendFrameSchema>;
+
+// Standalone send-frame schema — carries the coupling constraint.
+export const WsSendFrameSchema = WsSendFrameObjectSchema.refine(
+  sendPinCouplingValid,
+  SEND_PIN_COUPLING_REFINE_OPTS,
+);
+export type WsSendFrame = z.infer<typeof WsSendFrameObjectSchema>;
 
 export const WsCancelFrameSchema = z.object({
   type: z.literal('cancel'),
@@ -57,10 +110,19 @@ export const WsCancelFrameSchema = z.object({
 });
 export type WsCancelFrame = z.infer<typeof WsCancelFrameSchema>;
 
-export const WsFrameInboundSchema = z.discriminatedUnion('type', [
-  WsSendFrameSchema,
-  WsCancelFrameSchema,
-]);
+export const WsFrameInboundSchema = z
+  .discriminatedUnion('type', [
+    // Raw object member (the refined `WsSendFrameSchema` is a ZodEffects and
+    // can't be a discriminated-union member). The coupling constraint is
+    // re-applied at the union level below so a frame parsed through the
+    // inbound union (the gateway's frame parser) enforces it too.
+    WsSendFrameObjectSchema,
+    WsCancelFrameSchema,
+  ])
+  .refine(
+    (frame) => frame.type !== 'send' || sendPinCouplingValid(frame),
+    SEND_PIN_COUPLING_REFINE_OPTS,
+  );
 export type WsFrameInbound = z.infer<typeof WsFrameInboundSchema>;
 
 // ---------------------------------------------------------------------------
