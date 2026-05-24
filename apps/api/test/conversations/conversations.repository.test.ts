@@ -96,6 +96,68 @@ describe('ConversationsRepository', () => {
     });
   });
 
+  // chat-context-and-ux-polish LLD Tasks 74/75.
+  describe('update (generalized patch)', () => {
+    it('accepts a title-only patch and persists exactly that column', async () => {
+      const prisma = createInMemoryPrisma();
+      const repo = build(prisma);
+      const a = await seedUserWithConversations(prisma, 1);
+      const ok = await repo.update(a.convIds[0]!, a.userId, { title: 'renamed' });
+      expect(ok).toBe(true);
+      const row = await repo.getByIdForUser(a.convIds[0]!, a.userId);
+      expect(row!.title).toBe('renamed');
+    });
+
+    it('accepts both pin columns and persists them', async () => {
+      const prisma = createInMemoryPrisma();
+      const repo = build(prisma);
+      const a = await seedUserWithConversations(prisma, 1);
+      const ok = await repo.update(a.convIds[0]!, a.userId, {
+        pinnedProvider: 'anthropic',
+        pinnedModel: 'claude-haiku-4-5',
+      });
+      expect(ok).toBe(true);
+      const row = (await repo.getByIdForUser(a.convIds[0]!, a.userId))!;
+      expect(row.pinnedProvider).toBe('anthropic');
+      expect(row.pinnedModel).toBe('claude-haiku-4-5');
+    });
+
+    it('clears the pin when both fields are null', async () => {
+      const prisma = createInMemoryPrisma();
+      const repo = build(prisma);
+      const a = await seedUserWithConversations(prisma, 1);
+      await repo.update(a.convIds[0]!, a.userId, {
+        pinnedProvider: 'anthropic',
+        pinnedModel: 'claude-haiku-4-5',
+      });
+      const ok = await repo.update(a.convIds[0]!, a.userId, {
+        pinnedProvider: null,
+        pinnedModel: null,
+      });
+      expect(ok).toBe(true);
+      const row = (await repo.getByIdForUser(a.convIds[0]!, a.userId))!;
+      expect(row.pinnedProvider).toBeNull();
+      expect(row.pinnedModel).toBeNull();
+    });
+
+    it('returns true on an empty-patch no-op when the row exists for the user', async () => {
+      const prisma = createInMemoryPrisma();
+      const repo = build(prisma);
+      const a = await seedUserWithConversations(prisma, 1);
+      const ok = await repo.update(a.convIds[0]!, a.userId, {});
+      expect(ok).toBe(true);
+    });
+
+    it('returns false when the row is owned by a different user (preserves authz)', async () => {
+      const prisma = createInMemoryPrisma();
+      const repo = build(prisma);
+      const a = await seedUserWithConversations(prisma, 1);
+      const b = await seedUserWithConversations(prisma, 0);
+      const ok = await repo.update(a.convIds[0]!, b.userId, { title: 'evil' });
+      expect(ok).toBe(false);
+    });
+  });
+
   describe('delete', () => {
     it('deletes only when ownership matches', async () => {
       const prisma = createInMemoryPrisma();

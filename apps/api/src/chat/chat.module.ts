@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ChatService } from './chat.service';
 import { ChatGateway } from './chat.gateway';
 import { SeqCounterRegistry } from './seq-counter';
@@ -10,7 +10,11 @@ import { AuthModule } from '../auth/auth.module';
 import { ConversationsModule } from '../conversations/conversations.module';
 
 @Module({
-  imports: [AuthModule, ConversationsModule],
+  // forwardRef breaks the chat ↔ conversations cycle: the gateway needs
+  // ConversationsRepository; the conversations controller needs
+  // ContextMeterService (which chat owns). See conversations.module.ts for
+  // the matching forwardRef on the other side.
+  imports: [AuthModule, forwardRef(() => ConversationsModule)],
   providers: [
     ChatService,
     ChatGateway,

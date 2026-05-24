@@ -37,6 +37,11 @@ export interface ConversationRow {
   title: string;
   createdAt: Date;
   lastMessageAt: Date | null;
+  // chat-context-and-ux-polish LLD Task 35 — pin columns. Optional here so
+  // tests that push rows without pins keep working; production Prisma reads
+  // these as nullable text.
+  pinnedProvider?: string | null;
+  pinnedModel?: string | null;
 }
 
 export interface MessageRow {
@@ -236,6 +241,10 @@ export class InMemoryPrisma {
         title: args.data.title,
         createdAt: new Date(),
         lastMessageAt: null,
+        // chat-context-and-ux-polish LLD Task 35 — default both pin columns
+        // to null on insert so reads always see a stable shape.
+        pinnedProvider: null,
+        pinnedModel: null,
       };
       this.conversations.push(row);
       return clone(row);
