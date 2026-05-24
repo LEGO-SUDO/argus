@@ -127,6 +127,14 @@ export class ProjectionConsumer implements OnModuleInit, OnModuleDestroy {
     const { batch, resolveOffset, heartbeat, commitOffsetsIfNecessary, isRunning, isStale } =
       payload;
 
+    // Highest offset we successfully processed in this batch. We commit it
+    // explicitly below — `commitOffsetsIfNecessary()` with NO arguments is a
+    // no-op when the consumer runs with `autoCommit: false` (it only flushes
+    // on the autoCommit interval/threshold, which is disabled), so resolved
+    // offsets would never reach the broker and the group would re-read the
+    // same messages forever.
+    let lastProcessedOffset: string | undefined;
+
     for (const message of batch.messages) {
       if (!isRunning() || isStale()) return;
 
@@ -182,9 +190,28 @@ export class ProjectionConsumer implements OnModuleInit, OnModuleDestroy {
       );
 
       resolveOffset(message.offset);
+      lastProcessedOffset = message.offset;
       await heartbeat();
     }
-    await commitOffsetsIfNecessary();
+
+    // Commit the next offset to read (lastProcessed + 1) explicitly. Passing
+    // offsets makes `commitOffsetsIfNecessary` commit immediately regardless
+    // of the autoCommit config — this is what actually advances the group.
+    if (lastProcessedOffset !== undefined) {
+      await commitOffsetsIfNecessary({
+        topics: [
+          {
+            topic,
+            partitions: [
+              {
+                partition: batch.partition,
+                offset: (Number(lastProcessedOffset) + 1).toString(),
+              },
+            ],
+          },
+        ],
+      });
+    }
   }
 
   /**
