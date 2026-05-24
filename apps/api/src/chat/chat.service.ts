@@ -24,6 +24,7 @@
 // "incomplete inference".
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import type { InferenceKind } from '@argus/contracts';
 import { PrismaService } from '../common/prisma.service';
 
 export interface StartTurnInput {
@@ -39,6 +40,17 @@ export interface StartTurnInput {
    * single-call API for non-gateway callers).
    */
   assistantMessageId?: string;
+  /**
+   * Phase B: classifies the placeholder inference row. Defaults to `chat`.
+   * Replay runs pass `replay`, Generate-Samples passes `sample`.
+   */
+  kind?: InferenceKind;
+  /** Phase B: FK to the user message a `classifier` row was triggered by. */
+  classifierMessageId?: string;
+  /** Phase B: self-FK to the source inference a `replay` row re-runs. */
+  replayOfInferenceId?: string;
+  /** Phase B: FK to the sample workspace a `sample` (or inherited replay) row belongs to. */
+  sampleWorkspaceId?: string;
 }
 
 export interface StartTurnResult {
@@ -129,6 +141,13 @@ export class ChatService {
           provider: 'pending',
           model: 'pending',
           status: 'streaming',
+          // Phase B linkage — defaults to a plain `chat` row with null FKs so
+          // Phase A callers are unaffected; replay/sample/classifier callers
+          // set the kind + the matching FK column.
+          kind: input.kind ?? 'chat',
+          classifierForMessageId: input.classifierMessageId ?? null,
+          replayOfInferenceId: input.replayOfInferenceId ?? null,
+          sampleWorkspaceId: input.sampleWorkspaceId ?? null,
           startedAt: now,
         },
       });

@@ -26,6 +26,7 @@ import { AppModule } from './app.module';
 import { PrismaService } from './common/prisma.service';
 import { seedDemoUser } from './bootstrap/seed';
 import { captureApiError, initSentry } from './observability/sentry';
+import { resolvePhaseBLifecycle, startPhaseBServices, stopPhaseBServices } from './bootstrap/lifecycle';
 
 async function bootstrap(): Promise<void> {
   initSentry();
@@ -100,9 +101,16 @@ async function bootstrap(): Promise<void> {
   await app.listen(port, '0.0.0.0');
   logger.log(`api listening on :${port}`);
 
+  // Phase B: start the janitor + heartbeat schedulers and the live-events
+  // consumer after listen(); stop them (reverse order) on shutdown.
+  const phaseB = resolvePhaseBLifecycle(app);
+  await startPhaseBServices(phaseB);
+  logger.log('Phase B services started (janitor, heartbeat, live-events consumer)');
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.log(`received ${signal} — shutting down`);
     try {
+      await stopPhaseBServices(phaseB);
       await app.close();
       process.exit(0);
     } catch (err) {

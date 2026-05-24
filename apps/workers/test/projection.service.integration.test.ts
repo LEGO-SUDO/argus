@@ -8,10 +8,13 @@
 import { randomUUID } from 'node:crypto';
 import {
   OTEL_ATTRS,
+  LLM_KIND,
+  LLM_SAMPLE_WORKSPACE_ID,
   SPAN_EVENT_NAMES,
   type OtlpSpan,
 } from '@argus/contracts';
 import { ProjectionService } from '../src/projection/projection.service';
+import type { LiveEventsPublisher } from '../src/projection/live-events-publisher';
 import {
   bootIntegrationEnv,
   dockerAvailable,
@@ -31,11 +34,22 @@ if (!dockerAvailable()) {
 describeIntegration('ProjectionService.handle (integration)', () => {
   let env: IntegrationEnv;
   let service: ProjectionService;
+  // Publisher stub — the post-commit live-events publish is exercised via this
+  // spy so the integration tests can assert call count / ordering without a
+  // real kafka broker.
+  let publishSpy: jest.Mock;
 
   beforeAll(async () => {
     env = await bootIntegrationEnv();
-    service = new ProjectionService(env.prisma);
+    publishSpy = jest.fn().mockResolvedValue(undefined);
+    const publisher = { publish: publishSpy } as unknown as LiveEventsPublisher;
+    service = new ProjectionService(env.prisma, publisher);
   }, 120_000);
+
+  beforeEach(() => {
+    publishSpy.mockClear();
+    publishSpy.mockResolvedValue(undefined);
+  });
 
   afterAll(async () => {
     if (env) await tearDownIntegrationEnv(env);
@@ -95,8 +109,12 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     status?: 'ok' | 'failed';
     traceId?: string;
     spanId?: string;
+    startMs?: number;
+    // Phase B control-plane attributes (llm.kind + FK attrs). Merged into the
+    // attribute map so the consumer's preserve-raw-attributes path is exercised.
+    phaseB?: Record<string, unknown>;
   }): OtlpSpan {
-    const startMs = Date.now();
+    const startMs = args.startMs ?? Date.now();
     return {
       traceId: args.traceId ?? 'trace-' + randomUUID(),
       spanId: args.spanId ?? 'span-' + randomUUID(),
@@ -117,7 +135,8 @@ describeIntegration('ProjectionService.handle (integration)', () => {
         [OTEL_ATTRS.USER_ID]: args.userId,
         [OTEL_ATTRS.MESSAGE_ID]: args.messageId,
         [OTEL_ATTRS.TURN_INDEX]: 0,
-      },
+        ...(args.phaseB ?? {}),
+      } as unknown as OtlpSpan['attributes'],
       events: [
         {
           name: SPAN_EVENT_NAMES.LLM_INPUT,
@@ -323,5 +342,221 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     expect(src).not.toMatch(/prisma\.message\b/);
     expect(src).not.toMatch(/\.message\.update\b/);
     expect(src).not.toMatch(/\.message\.create\b/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 29/30: clear-fence drops a span ahead of the fence — no rows, no publish.
+  // -------------------------------------------------------------------------
+  it('drops a span (no trace_events, no inference, no publish) when the fence is ahead of startedAt', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const messageId = randomUUID();
+    await env.prisma.userClearFence.create({
+      data: { userId, clearAfterTs: new Date(Date.now() + 3_600_000) },
+    });
+    // Span started a minute ago — well before the fence.
+    const span = makeSpan({ messageId, conversationId, userId, startMs: Date.now() - 60_000 });
+    await service.handle(span);
+
+    expect(await env.prisma.inference.count({ where: { messageId } })).toBe(0);
+    expect(
+      await env.prisma.traceEvent.count({
+        where: { traceId: span.traceId, spanId: span.spanId },
+      }),
+    ).toBe(0);
+    expect(publishSpy).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 31(a): publish fires AFTER the commit, exactly once, snake_case payload.
+  // -------------------------------------------------------------------------
+  it('publishes exactly once on a fresh span, after the inference row is committed', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const messageId = randomUUID();
+    await seedPlaceholderInference({
+      messageId,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    // Observe commit ordering: when publish fires, the enriched row must be
+    // visible (committed) already.
+    let visibleAtPublish = -1;
+    publishSpy.mockImplementation(async () => {
+      visibleAtPublish = await env.prisma.inference.count({
+        where: { messageId, status: 'ok' },
+      });
+    });
+
+    const span = makeSpan({ messageId, conversationId, userId });
+    await service.handle(span);
+
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    expect(visibleAtPublish).toBe(1);
+    expect(publishSpy.mock.calls[0]![0]).toEqual({
+      user_id: userId,
+      kind: 'chat',
+      conversation_id: conversationId,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 31(b): a DB transaction failure means NO publish (the tick would lie).
+  // -------------------------------------------------------------------------
+  it('never publishes when the DB transaction throws', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const messageId = randomUUID();
+    await seedPlaceholderInference({
+      messageId,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    const txSpy = jest
+      .spyOn(env.prisma, '$transaction')
+      .mockRejectedValueOnce(new Error('db down') as never);
+    const span = makeSpan({ messageId, conversationId, userId });
+
+    await expect(service.handle(span)).rejects.toThrow('db down');
+    expect(publishSpy).not.toHaveBeenCalled();
+    txSpy.mockRestore();
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 31(c): a duplicate redelivery publishes ONCE (not per delivery).
+  // -------------------------------------------------------------------------
+  it('publishes exactly once across a duplicate redelivery', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const messageId = randomUUID();
+    await seedPlaceholderInference({
+      messageId,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    const span = makeSpan({ messageId, conversationId, userId });
+
+    await service.handle(span);
+    await service.handle(span); // redelivery: identical (trace_id, span_id, name)
+
+    expect(await env.prisma.inference.count({ where: { messageId } })).toBe(1);
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 34: clear-fence proceed (past fence) and no-fence branches both
+  // persist and publish exactly once each.
+  // -------------------------------------------------------------------------
+  it('clear-fence proceed and no-fence branches both persist and publish exactly once', async () => {
+    const a = await seedUserAndConversation();
+    await env.prisma.userClearFence.create({
+      data: { userId: a.userId, clearAfterTs: new Date(Date.now() - 3_600_000) },
+    });
+    const b = await seedUserAndConversation();
+    const msgA = randomUUID();
+    const msgB = randomUUID();
+    await seedPlaceholderInference({
+      messageId: msgA,
+      userId: a.userId,
+      conversationId: a.conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    await seedPlaceholderInference({
+      messageId: msgB,
+      userId: b.userId,
+      conversationId: b.conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    const spanA = makeSpan({ messageId: msgA, conversationId: a.conversationId, userId: a.userId });
+    const spanB = makeSpan({ messageId: msgB, conversationId: b.conversationId, userId: b.userId });
+
+    await service.handle(spanA);
+    await service.handle(spanB);
+
+    expect(await env.prisma.inference.count({ where: { messageId: msgA } })).toBe(1);
+    expect(await env.prisma.inference.count({ where: { messageId: msgB } })).toBe(1);
+    expect(
+      await env.prisma.traceEvent.count({ where: { traceId: spanA.traceId, spanId: spanA.spanId } }),
+    ).toBe(2);
+    expect(
+      await env.prisma.traceEvent.count({ where: { traceId: spanB.traceId, spanId: spanB.spanId } }),
+    ).toBe(2);
+    expect(publishSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 35: Phase B write payload — a sample span persists kind=sample +
+  // sample_workspace_id; a chat span on the SAME code path persists kind=chat
+  // + null FK (HLD D5 "no parallel write code").
+  // -------------------------------------------------------------------------
+  it('persists the Phase B columns: sample span (kind+FK) and chat span (default) via the same path', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const ws = await env.prisma.sampleWorkspace.create({ data: { userId } });
+
+    const sampleMsg = randomUUID();
+    await seedPlaceholderInference({
+      messageId: sampleMsg,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    await service.handle(
+      makeSpan({
+        messageId: sampleMsg,
+        conversationId,
+        userId,
+        phaseB: { [LLM_KIND]: 'sample', [LLM_SAMPLE_WORKSPACE_ID]: ws.id },
+      }),
+    );
+    const sampleRow = await env.prisma.inference.findFirst({ where: { messageId: sampleMsg } });
+    expect(sampleRow?.kind).toBe('sample');
+    expect(sampleRow?.sampleWorkspaceId).toBe(ws.id);
+
+    const chatMsg = randomUUID();
+    await seedPlaceholderInference({
+      messageId: chatMsg,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+    await service.handle(makeSpan({ messageId: chatMsg, conversationId, userId }));
+    const chatRow = await env.prisma.inference.findFirst({ where: { messageId: chatMsg } });
+    expect(chatRow?.kind).toBe('chat');
+    expect(chatRow?.sampleWorkspaceId).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 37 [regression]: heartbeat burst with duplicate redeliveries. Row and
+  // publish counts match the unique-span count, NOT the total invocation count.
+  // (Models the api heartbeat emitter carrying >=1 span event so the
+  // (trace_id, span_id, name) dedup gate applies — per the Codex review note.)
+  // -------------------------------------------------------------------------
+  it('heartbeat idempotency burst: rows + publishes match the unique-span count', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const BURST = 6;
+    const spans = Array.from({ length: BURST }, () =>
+      makeSpan({
+        messageId: randomUUID(),
+        conversationId,
+        userId,
+        phaseB: { [LLM_KIND]: 'heartbeat' },
+      }),
+    );
+    for (const s of spans) await service.handle(s);
+    // Redeliver half — identical tuples collide on the first event (P2002).
+    for (const s of spans.slice(0, BURST / 2)) await service.handle(s);
+
+    expect(await env.prisma.inference.count({ where: { userId, kind: 'heartbeat' } })).toBe(BURST);
+    // Each span carries 2 events (llm.input + llm.output) -> 2 trace_events/span.
+    expect(await env.prisma.traceEvent.count({ where: { userId, kind: 'heartbeat' } })).toBe(
+      BURST * 2,
+    );
+    expect(publishSpy).toHaveBeenCalledTimes(BURST);
   });
 });

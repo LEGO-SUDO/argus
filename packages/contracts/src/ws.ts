@@ -28,6 +28,19 @@ export const WS_PATH = '/ws/chat';
 // Inbound (client → server)
 // ---------------------------------------------------------------------------
 
+// Phase B: the provider the user selected in the four-option `/console` /
+// chat selector. `auto` routes via the Auto classifier/heuristic; the rest
+// pin a specific provider. Optional + defaulted at the gateway (absent → mock)
+// so Phase A clients that omit it keep working.
+export const ChatProviderSelectionSchema = z.enum([
+  'auto',
+  'openai',
+  'anthropic',
+  'gemini',
+  'mock',
+]);
+export type ChatProviderSelection = z.infer<typeof ChatProviderSelectionSchema>;
+
 export const WsSendFrameSchema = z.object({
   type: z.literal('send'),
   // Null for the FIRST turn of a brand-new conversation — the gateway mints
@@ -39,6 +52,8 @@ export const WsSendFrameSchema = z.object({
   // The user-authored content for this turn. The server mints `message_id`
   // — client never assigns one (HLD D1 — gateway is sole minter).
   content: z.string().min(1).max(64_000),
+  // Phase B provider selection (optional for Phase A back-compat).
+  provider: ChatProviderSelectionSchema.optional(),
 });
 export type WsSendFrame = z.infer<typeof WsSendFrameSchema>;
 

@@ -49,6 +49,21 @@ enum InferenceStatus {
   canceled
 }
 
+// Phase B: the kind taxonomy that classifies every inference + trace event.
+// `chat` is the default (Phase A backfill rows are honestly chat). `unknown`
+// is reserved EXCLUSIVELY for OTel values the consumer did not recognize
+// (HLD §Forward-Compat Locks). Mapped to the Postgres enum `inference_kind`.
+enum InferenceKind {
+  chat
+  classifier
+  replay
+  sample
+  heartbeat
+  unknown
+
+  @@map("inference_kind")
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -59,23 +74,30 @@ model User {
   passwordHash String   @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  sessions      Session[]
-  conversations Conversation[]
-  messages      Message[]
-  inferences    Inference[]
-  traceEvents   TraceEvent[]
+  sessions         Session[]
+  conversations    Conversation[]
+  messages         Message[]
+  inferences       Inference[]
+  traceEvents      TraceEvent[]
+  sampleWorkspaces SampleWorkspace[]
+  clearFence       UserClearFence?
 
   @@map("users")
 }
 
 model Session {
-  id        String   @id @default(uuid()) @db.Uuid
-  userId    String   @map("user_id") @db.Uuid
-  tokenHash String   @unique @map("token_hash")
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  id                       String   @id @default(uuid()) @db.Uuid
+  userId                   String   @map("user_id") @db.Uuid
+  tokenHash                String   @unique @map("token_hash")
+  expiresAt                DateTime @map("expires_at")
+  createdAt                DateTime @default(now()) @map("created_at")
+  // Phase B: the sample workspace the user is currently viewing in /console.
+  // SET NULL on workspace delete — losing the workspace must NOT delete the
+  // session (the api Generate-Samples flow owns writes to this pointer).
+  currentSampleWorkspaceId String?  @map("current_sample_workspace_id") @db.Uuid
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currentSampleWorkspace SampleWorkspace? @relation("SessionCurrentSampleWorkspace", fields: [currentSampleWorkspaceId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([expiresAt])
@@ -106,8 +128,11 @@ model Message {
   createdAt      DateTime      @default(now()) @map("created_at")
   completedAt    DateTime?     @map("completed_at")
 
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user                 User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation         Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  // Phase B: inferences produced by the classifier for this message (back-relation
+  // of inferences.classifier_for_message_id).
+  classifierInferences Inference[]  @relation("InferenceClassifierForMessage")
 
   @@index([conversationId, createdAt])
   @@map("messages")
@@ -121,6 +146,10 @@ model Inference {
   provider                String
   model                   String
   status                  InferenceStatus
+  // Phase B: classifies every inference. DEFAULT chat — Phase A backfill rows
+  // are honestly chat; `unknown` is set ONLY by the consumer when the OTel
+  // llm.kind value is unrecognized. Index below backs per-kind aggregate reads.
+  kind                    InferenceKind   @default(chat) @map("kind")
   latencyMs               Int?            @map("latency_ms")
   promptTokens            Int?            @map("prompt_tokens")
   completionTokens        Int?            @map("completion_tokens")
@@ -133,8 +162,23 @@ model Inference {
   traceId                 String?         @map("trace_id")
   spanId                  String?         @map("span_id")
   errorCode               String?         @map("error_code")
+  // Phase B FK columns — all nullable, populated by the consumer from span
+  // attributes (HLD D3/D5). No DB delete cascade onto these from inferences.
+  classifierForMessageId  String?         @map("classifier_for_message_id") @db.Uuid
+  replayOfInferenceId     String?         @map("replay_of_inference_id") @db.Uuid
+  sampleWorkspaceId       String?         @map("sample_workspace_id") @db.Uuid
+  // Phase B: @updatedAt is Prisma-client-managed (NOT a DB trigger). Every
+  // update to an inferences row MUST flow through PrismaClient or this stalls.
+  // Backs the janitor predicate (HLD D9) and the api stream-progress tick.
+  // @default(now()) gives the migration a DEFAULT CURRENT_TIMESTAMP so existing
+  // Phase A rows backfill cleanly (and keeps schema↔migration drift-free).
+  updatedAt               DateTime        @default(now()) @updatedAt @map("updated_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                 User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  classifierForMessage Message?         @relation("InferenceClassifierForMessage", fields: [classifierForMessageId], references: [id], onDelete: SetNull)
+  replayOfInference    Inference?       @relation("InferenceReplayOf", fields: [replayOfInferenceId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  replayedBy           Inference[]      @relation("InferenceReplayOf")
+  sampleWorkspace      SampleWorkspace? @relation(fields: [sampleWorkspaceId], references: [id], onDelete: SetNull)
 
   // Regular index — NOT unique. Failover attempts share message_id, one row each.
   @@index([messageId])
@@ -144,26 +188,72 @@ model Inference {
   // them; not unique because the same (trace, span) may legitimately be
   // referenced by both an enrichment write and a future failover-history row.
   @@index([traceId, spanId])
+  // Phase B query-filter indexes.
+  @@index([kind])
+  @@index([classifierForMessageId])
+  @@index([replayOfInferenceId])
+  @@index([sampleWorkspaceId])
   @@map("inferences")
 }
 
 model TraceEvent {
-  id        String   @id @default(uuid()) @db.Uuid
-  traceId   String   @map("trace_id")
-  spanId    String   @map("span_id")
-  messageId String?  @map("message_id") @db.Uuid
-  userId    String?  @map("user_id") @db.Uuid
+  id        String         @id @default(uuid()) @db.Uuid
+  traceId   String         @map("trace_id")
+  spanId    String         @map("span_id")
+  messageId String?        @map("message_id") @db.Uuid
+  userId    String?        @map("user_id") @db.Uuid
   name      String
-  payload   Json     @db.JsonB
-  truncated Boolean  @default(false)
-  createdAt DateTime @default(now()) @map("created_at")
+  payload   Json           @db.JsonB
+  truncated Boolean        @default(false)
+  // Phase B: denormalized kind, populated by the consumer from llm.kind so
+  // ops can group trace events per-kind without joining inferences. Nullable
+  // because Phase A rows predate it — only forward writes carry it.
+  kind      InferenceKind? @map("kind")
+  createdAt DateTime       @default(now()) @map("created_at")
 
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  // Idempotency guard for projection consumer — duplicate OTel deliveries
-  // are normal under Collector retries. Unique violation = skip verdict.
-  @@unique([traceId, spanId])
+  // Idempotency guard for projection consumer — duplicate OTel deliveries are
+  // normal under Collector retries. Widened to (trace_id, span_id, name) in
+  // migration 0003: a single span persists multiple named events (llm.input +
+  // llm.output) on first delivery, while a redelivered span repeats identical
+  // tuples and still collides on its first event (P2002 = skip verdict).
+  @@unique([traceId, spanId, name])
   @@index([userId, createdAt(sort: Desc)])
   @@index([messageId])
+  @@index([kind, createdAt(sort: Desc)])
   @@map("trace_events")
+}
+
+// ---------------------------------------------------------------------------
+// Phase B tables
+// ---------------------------------------------------------------------------
+
+// One per Generate-Samples run (HLD D5). Owned (written) by apps/api; the
+// projection consumer only references it via inferences.sample_workspace_id.
+// Deleting the owning user cascades the workspace away.
+model SampleWorkspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inferences Inference[]
+  sessions   Session[]   @relation("SessionCurrentSampleWorkspace")
+
+  @@index([userId])
+  @@map("sample_workspaces")
+}
+
+// One row per user (PK = user_id). The api Clear flow upserts clear_after_ts;
+// the projection consumer reads it to drop spans older than the fence (HLD D8).
+// PK on user_id is the only index the single-row fence lookup needs.
+model UserClearFence {
+  userId       String   @id @map("user_id") @db.Uuid
+  clearAfterTs DateTime @map("clear_after_ts")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_clear_fences")
 }

@@ -23,6 +23,7 @@
 //   - handleDisconnect: call .onDisconnect() on every active orchestrator
 //     for that connection. Release per-message seq counters.
 import {
+  Inject,
   Logger,
   type OnModuleInit,
 } from '@nestjs/common';
@@ -39,10 +40,32 @@ import { StreamOrchestrator } from './stream-orchestrator';
 import { resolveWsUser } from '../auth/ws-session';
 import { AuthService } from '../auth/auth.service';
 import { ConversationsRepository } from '../conversations/conversations.repository';
-import { WS_PATH, WsFrameInboundSchema, type WsFrameOutbound } from '@argus/contracts';
-import { chat as sdkChat } from '@argus/sdk';
+import {
+  WS_PATH,
+  WsFrameInboundSchema,
+  type WsFrameOutbound,
+  type ChatProviderSelection,
+} from '@argus/contracts';
+import { SDK_CHAT_TOKEN, type SdkChat } from '../common/sdk';
+import { AutoRouterService } from '../auto/auto-router.service';
+import { OrchestratorRegistry } from '../orchestrator/registry';
+import type { OrchestratorHandle } from '../orchestrator/handle';
 import { captureApiError, withWsScope } from '../observability/sentry';
 import { buildEndFrame, buildErrorFrame } from './frame-builder';
+
+// Representative model label per provider for the `start` frame. The SDK
+// determines the real model from env config and reports it on the `done`
+// chunk's providerMeta; this is the optimistic label shown before first token.
+const DEFAULT_MODEL_FOR: Record<string, string> = {
+  openai: 'gpt-4o-mini',
+  anthropic: 'claude-haiku-4-5',
+  gemini: 'gemini-3-flash-preview',
+  mock: 'mock-1',
+};
+
+function defaultModelFor(provider: string): string {
+  return DEFAULT_MODEL_FOR[provider] ?? 'mock-1';
+}
 
 interface ChatClient extends WebSocket {
   data?: ChatClientData;
@@ -65,6 +88,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     private readonly seqRegistry: SeqCounterRegistry,
     private readonly auth: AuthService,
     private readonly conversations: ConversationsRepository,
+    private readonly autoRouter: AutoRouterService,
+    private readonly registry: OrchestratorRegistry,
+    @Inject(SDK_CHAT_TOKEN) private readonly sdk: SdkChat,
   ) {}
 
   onModuleInit(): void {
@@ -173,7 +199,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   private async handleSend(
     client: ChatClient,
     data: ChatClientData,
-    frame: { type: 'send'; conversationId: string | null; content: string },
+    frame: { type: 'send'; conversationId: string | null; content: string; provider?: ChatProviderSelection },
   ): Promise<void> {
     // Mint the assistant messageId BEFORE any work that can fail — the
     // frontend correlates `error` / `end` frames to its `send` frame by
@@ -211,8 +237,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       conversationId = frame.conversationId;
     }
 
+    let userMessageId: string;
     try {
-      await this.chatService.startTurn({
+      const result = await this.chatService.startTurn({
         userId: data.userId,
         conversationId,
         userMessageContent: frame.content,
@@ -221,6 +248,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         // written on success.
         assistantMessageId,
       });
+      userMessageId = result.userMessageId;
     } catch (err) {
       captureApiError({
         err,
@@ -232,31 +260,74 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       return;
     }
 
+    // Resolve the provider BEFORE opening the SDK stream. `auto` delegates to
+    // the Auto router (which may persist a classifier row); every other
+    // selection passes through unchanged. Absent selection → mock (Phase A).
+    let provider = 'mock';
+    if (frame.provider === 'auto') {
+      try {
+        const decision = await this.autoRouter.route({
+          userId: data.userId,
+          conversationId,
+          userMessageId,
+          content: frame.content,
+        });
+        provider = decision.provider;
+      } catch (err) {
+        // Router never throws (it self-heals to the heuristic), but guard
+        // anyway so a routing bug degrades to mock rather than dropping the turn.
+        captureApiError({
+          err,
+          feature: 'auto',
+          layer: 'gateway',
+          extra: { stage: 'route', conversationId, messageId: assistantMessageId },
+        });
+        provider = 'mock';
+      }
+    } else if (frame.provider) {
+      provider = frame.provider;
+    }
+    const model = defaultModelFor(provider);
+
     const abort = new AbortController();
     const turnIndex = await this.computeTurnIndex(conversationId);
-    const sdkStream = sdkChat.stream({
+    const sdkStream = this.sdk.stream({
       messages: [{ role: 'user', content: frame.content }],
       conversationId,
       turnIndex,
       userId: data.userId,
       messageId: assistantMessageId,
       signal: abort.signal,
+      // Provider/model hint — consumed by the SDK router once it lands; a no-op
+      // against the Phase A SDK (which selects via env).
+      provider,
+      model,
     });
 
     const orchestrator = new StreamOrchestrator(this.chatService, this.seqRegistry, {
       messageId: assistantMessageId,
       conversationId,
-      provider: 'mock', // Phase A stub; real SDK populates this in the start frame later
-      model: 'mock-1',
+      provider,
+      model,
       sdkStream,
       abort,
       emit: (out) => this.send(client, out),
     });
     data.orchestrators.set(assistantMessageId, orchestrator);
 
+    // Register in the global registry so the Clear flow's cancelAll(userId) can
+    // stop this run; the per-connection map (above) handles WS cancel/disconnect.
+    const handle: OrchestratorHandle = {
+      messageId: assistantMessageId,
+      kind: 'chat',
+      cancel: () => orchestrator.cancel(),
+    };
+    this.registry.register(data.userId, handle);
+
     // Fire-and-forget; the orchestrator handles its own errors.
     void orchestrator.runStream().finally(() => {
       data.orchestrators.delete(assistantMessageId);
+      this.registry.deregister(data.userId, assistantMessageId);
     });
   }
 

@@ -222,11 +222,11 @@ export function extractSpans(parsed: unknown): OtlpSpan[] {
     if (Array.isArray(parsed)) {
       for (const candidate of parsed) {
         const result = OtlpSpanSchema.safeParse(candidate);
-        if (result.success) out.push(result.data);
+        if (result.success) out.push(preserveRawAttributes(result.data, candidate));
       }
     } else {
       const result = OtlpSpanSchema.safeParse(parsed);
-      if (result.success) out.push(result.data);
+      if (result.success) out.push(preserveRawAttributes(result.data, parsed));
     }
     return out;
   }
@@ -253,11 +253,32 @@ export function extractSpans(parsed: unknown): OtlpSpan[] {
           status: sp.status,
         };
         const result = OtlpSpanSchema.safeParse(candidate);
-        if (result.success) out.push(result.data);
+        if (result.success) out.push(preserveRawAttributes(result.data, candidate));
       }
     }
   }
   return out;
+}
+
+/**
+ * Re-attach the raw (un-stripped) attribute map onto a validated span.
+ *
+ * Phase B control-plane attributes (`llm.kind` + the FK attrs) are not declared
+ * in the contracts-owned OtelAttributesSchema, so zod strips them from
+ * `result.data`. The validated values for the declared keys are identical to
+ * the raw map, so we merge the raw attributes UNDER the validated ones: declared
+ * keys keep their validated values, Phase B keys survive for the mapper.
+ */
+function preserveRawAttributes(span: OtlpSpan, candidate: unknown): OtlpSpan {
+  const rawAttrs = (candidate as { attributes?: unknown } | null)?.attributes;
+  if (!rawAttrs || typeof rawAttrs !== 'object') return span;
+  return {
+    ...span,
+    attributes: {
+      ...(rawAttrs as Record<string, unknown>),
+      ...span.attributes,
+    } as OtlpSpan['attributes'],
+  };
 }
 
 interface OtlpRawSpan {

@@ -22,3 +22,9 @@ export * from './ws';
 export * from './auth';
 export * from './conversations';
 export * from './errors';
+// Phase B (control plane) additions:
+//   - live-events.ts   Kafka `live-events` payload + SSE tick + inference-kind enum
+//   - console.ts       `/console/*` REST DTOs (Traces / Cost / Replay / Samples /
+//                      Clear / live-badge / provider-availability) + CONSOLE_LIVE_PATH
+export * from './live-events';
+export * from './console';
