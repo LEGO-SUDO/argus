@@ -52,7 +52,11 @@ exporters:
     # simplifies projection-write ordering for failover-attempt rows.
     partition_traces_by_id: true
     producer:
-      compression: snappy
+      # gzip rather than snappy: kafkajs 2.x has built-in gzip support but
+      # requires a third-party codec package for snappy/lz4/zstd. Wire-size
+      # tradeoff is negligible for our throughput; keeping the consumer
+      # zero-dep is worth more than a few KB per batch.
+      compression: gzip
       max_message_bytes: 1048576 # 1 MiB; payload cap is enforced in SDK + consumer.
       required_acks: 1
 

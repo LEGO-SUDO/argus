@@ -22,7 +22,11 @@
     "compose:ps": "docker compose -f infra/compose/docker-compose.yml --env-file .env ps",
     "compose:reset": "docker compose -f infra/compose/docker-compose.yml --env-file .env down -v",
     "infra:up": "docker compose -f infra/compose/docker-compose.yml --env-file .env up -d postgres redpanda redpanda-bootstrap otel-collector jaeger",
-    "infra:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env down"
+    "infra:down": "docker compose -f infra/compose/docker-compose.yml --env-file .env down",
+    "dev:api": "sh -c 'set -a; . ./.env; set +a; pnpm --filter @argus/api dev'",
+    "dev:workers": "sh -c 'set -a; . ./.env; set +a; pnpm --filter @argus/workers dev'",
+    "dev:web": "sh -c 'set -a; . ./.env; set +a; pnpm --filter @argus/web dev'",
+    "dev:migrate": "sh -c 'set -a; . ./.env; set +a; pnpm --filter @argus/db exec prisma migrate deploy'"
   },
   "devDependencies": {
     "turbo": "^2.3.3",
