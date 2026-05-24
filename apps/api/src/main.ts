@@ -46,6 +46,13 @@ async function bootstrap(): Promise<void> {
   app.use(cookieParser());
   app.useWebSocketAdapter(new WsAdapter(app));
 
+  // GET /healthz — process-level liveness probe used by the compose
+  // healthcheck. Plain Express route (not a Nest controller) because we
+  // want it to short-circuit guards, filters, and module init order.
+  app.use('/healthz', (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
+    res.status(200).json({ ok: true });
+  });
+
   // Task 56 — fail-fast db ping so compose boot-order regressions surface as a
   // clear error rather than a cryptic Prisma stack inside seedDemoUser.
   const prismaService = app.get(PrismaService);
