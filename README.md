@@ -24,6 +24,26 @@ both `api` and `workers` plus `Ready in Xs` from `web`:
 - **Chat UI** — http://localhost:3000 → log in as `demo@argus.dev` / `let-me-in-9`
 - **Jaeger trace UI** — http://localhost:16686
 
+### Real provider streaming (optional)
+
+The default boot uses the deterministic mock provider so the stack is
+end-to-end exercisable with zero keys. To stream from a real LLM, set
+`MOCK_PROVIDER=false` in `.env` and add at least one of:
+
+```
+OPENAI_API_KEY=sk-...        # tried first by default
+ANTHROPIC_API_KEY=sk-ant-... # tried if OpenAI fails before first token
+GOOGLE_API_KEY=...           # last in default order
+```
+
+The router fails over between configured providers if the chosen one
+errors **before** the first token. Mid-stream errors propagate to the
+client without stitching (so the assistant message you see came from
+exactly one provider). Default models are cheap+fast (`gpt-4o-mini`,
+`claude-haiku-4-5`, `gemini-3-flash-preview`) — override via
+`OPENAI_MODEL` / `ANTHROPIC_MODEL` / `GOOGLE_MODEL`. Reorder priority via
+`PROVIDER_ORDER=anthropic,openai,gemini`.
+
 ## Workspaces
 
 | Path | Purpose |

@@ -76,16 +76,24 @@ services:
       - --overprovisioned
       - --node-id=0
       - --check=false
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      # Two listeners: `internal` for container-to-container traffic on the
+      # compose network, `external` for hybrid-dev workers running on the
+      # host. Each must advertise an address the *client* can resolve — a
+      # single PLAINTEXT://redpanda:9092 listener breaks the host path
+      # because kafkajs follows the advertised address after bootstrap and
+      # `redpanda` doesn't resolve outside the docker network.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
       - --rpc-addr=0.0.0.0:33145
       - --advertise-rpc-addr=redpanda:33145
     volumes:
       - redpanda_data:/var/lib/redpanda/data
-    # Host-bound so local workers (hybrid mode) can produce/consume via
-    # localhost:9092. Admin API exposed on 9644 for `rpk` debugging.
+    # 19092 is the host-facing external listener (advertised as localhost:19092).
+    # 9092 stays internal-only; the container is on the compose network so
+    # other services reach it as redpanda:9092 without going through the host.
+    # Admin API on 9644 for `rpk` debugging.
     ports:
-      - "9092:9092"
+      - "19092:19092"
       - "9644:9644"
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 --exit-when-healthy"]
@@ -176,6 +184,10 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-}"
+      GOOGLE_MODEL: "${GOOGLE_MODEL:-}"
+      PROVIDER_ORDER: "${PROVIDER_ORDER:-}"
       # Fail-fast: compose refuses to render the api service if SESSION_SECRET
       # is unset. The .env.example ships this as empty so a fresh checkout
       # produces a loud "SESSION_SECRET must be set" error rather than silently
