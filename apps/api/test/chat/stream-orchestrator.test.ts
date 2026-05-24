@@ -326,6 +326,51 @@ describe('StreamOrchestrator', () => {
       expect(metadataFrames).toHaveLength(1);
     });
 
+    // chat-context-and-ux-polish (Codex review — runtime invariant: metadata
+    // exactly once per completed turn). A malformed/injected SDK stream that
+    // emits `done` with NO commit and NO token must still get a defensive
+    // metadata frame so a completed turn always carries metadata exactly once.
+    it('emits a defensive metadata frame from done when the stream never committed and emitted no token', async () => {
+      const seqRegistry = new SeqCounterRegistry();
+      const { svc } = fakeChatService();
+      const { emit, frames } = emitter();
+      const abort = new AbortController();
+      const warn = jest
+        .spyOn(
+          (StreamOrchestrator as unknown as { logger: { warn: (m: string) => void } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      try {
+        const commitlessDone: AsyncIterable<ChatStreamChunk> = {
+          async *[Symbol.asyncIterator]() {
+            // No commit, no token — just a terminal done.
+            yield { type: 'done', providerMeta: { provider: 'mock', model: 'mock-1' } };
+          },
+        };
+        const o = new StreamOrchestrator(svc, seqRegistry, {
+          messageId,
+          conversationId,
+          sdkStream: commitlessDone,
+          abort,
+          emit,
+        });
+        await o.runStream();
+        const types = frames.map((f) => f.type);
+        expect(types).toEqual(['start', 'metadata', 'end']);
+        const seqs = frames.map((f) => ('seq' in f ? f.seq : -1));
+        expect(seqs).toEqual([0, 1, 2]);
+        const meta = frames.find((f) => f.type === 'metadata')!;
+        expect(meta.type === 'metadata' && meta.providerMeta).toEqual({
+          provider: 'mock',
+          model: 'mock-1',
+        });
+        expect(warn.mock.calls[0]![0] as string).toContain('metadata.missing_commit');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('pre-token error: NO metadata frame leaks between start and the terminal failure end', async () => {
       const seqRegistry = new SeqCounterRegistry();
       const { svc, rec } = fakeChatService();

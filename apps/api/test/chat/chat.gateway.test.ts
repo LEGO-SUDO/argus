@@ -314,6 +314,62 @@ describe('ChatGateway.handleSend — SDK request threading', () => {
     expect(capturedRequests[0]!.contextWindowCap).toBe(8192);
   });
 
+  // chat-context-and-ux-polish (Codex review — mixed-hint behavior). When the
+  // pin is set but NOT in the catalog, effectiveBudget falls back to the
+  // configured default while contextWindowCap is OMITTED (no misleading zero).
+  it('omits contextWindowCap for an unknown pin while still threading the default effectiveBudget (Tasks 62/63)', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, {
+      catalog: {
+        // Unknown pin → SDK's tolerance returns the configured default.
+        getEffectiveBudget: (configuredDefault) => configuredDefault,
+        // Catalog has no entry for the pinned pair → cap unknown.
+        getCatalogEntry: () => null,
+      },
+    });
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-unicorn-9000',
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+    const r = capturedRequests[0]!;
+    expect(typeof r.effectiveBudget).toBe('number');
+    expect(r.contextWindowCap).toBeUndefined();
+    // The pin itself is still threaded (the gateway doesn't validate it; the
+    // SDK override branch surfaces pinned_provider_unavailable if needed).
+    expect(r.pin).toEqual({ provider: 'openai', model: 'gpt-unicorn-9000' });
+  });
+
+  // chat-context-and-ux-polish (Codex review — legacy half-pin tolerance). A
+  // corrupt row with only pinnedProvider set (model null) must NOT thread a
+  // half-pin onto the SDK request — the gateway treats it as unpinned.
+  it('treats a legacy half-pin (provider set, model null) as unpinned — no pin on the SDK request', async () => {
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma);
+    const { userId, conversationId } = await seedPinnedConv(prisma, {
+      pinnedProvider: 'openai',
+      pinnedModel: null,
+    });
+    const client = fakeClient(userId);
+    await (gateway as unknown as {
+      handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void>;
+    }).handleSend(client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+    });
+    await tick();
+    expect(capturedRequests[0]!.pin).toBeUndefined();
+  });
+
   it('threads the cached guessProvider derived at module init (Tasks 64/65)', async () => {
     const prisma = createInMemoryPrisma();
     const { gateway, capturedRequests } = build(prisma, {

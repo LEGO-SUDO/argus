@@ -70,6 +70,10 @@ export class StreamOrchestrator {
   // metadata exactly once (Preamble §2).
   private metadataEmitted = false;
   private committedProviderMeta: ProviderMeta | null = null;
+  // Tracks whether any token frame has been emitted — used to gate the
+  // defensive metadata-from-done emission so it can't collide with a token's
+  // seq slot (see the `done` branch in runStream).
+  private tokenEmitted = false;
 
   constructor(
     private readonly chat: ChatService,
@@ -137,12 +141,35 @@ export class StreamOrchestrator {
           // saw if cancelTurn raced ahead and persisted N).
           if (this.terminal !== null) return;
           this.partialContent += chunk.content;
+          this.tokenEmitted = true;
           this.emit(buildTokenFrame(this.input.messageId, counter.next(), chunk.content));
         } else if (chunk.type === 'done') {
           providerMeta = chunk.providerMeta;
-          // LLD Preamble §2: never re-emit metadata from done. The
-          // providerMeta here exists for the inferences-row enrichment
-          // path (workers projection consumer); we just stash it.
+          // LLD Preamble §2: never re-emit metadata from `done` once a commit
+          // already produced it. The providerMeta here exists for the
+          // inferences-row enrichment path (workers projection consumer); we
+          // just stash it.
+          //
+          // chat-context-and-ux-polish (Codex review — runtime invariant:
+          // metadata exactly once per COMPLETED turn). The real router always
+          // emits a commit before the first token, but a malformed/injected
+          // SDK stream might emit done with no commit. To keep the wire
+          // invariant we defensively mint metadata from `done` IFF no commit
+          // ever fired AND no token has been emitted — the no-token guard
+          // ensures the defensive metadata claims the still-free seq=1 slot
+          // rather than colliding with a token. (A commit-less stream that DID
+          // emit tokens already broke the ordering irrecoverably; we leave it
+          // to the error/Sentry path and don't manufacture a late metadata
+          // frame that would duplicate a token's seq.)
+          if (!this.metadataEmitted && !this.tokenEmitted) {
+            this.metadataEmitted = true;
+            this.committedProviderMeta = chunk.providerMeta;
+            StreamOrchestrator.logger.warn(
+              `metadata.missing_commit messageId=${this.input.messageId} provider=${chunk.providerMeta.provider} model=${chunk.providerMeta.model} — emitting defensive metadata from done`,
+            );
+            counter.next(); // consume seq 1 for the metadata frame
+            this.emit(buildMetadataFrame(this.input.messageId, { ...chunk.providerMeta }));
+          }
         }
       }
     } catch (err) {
