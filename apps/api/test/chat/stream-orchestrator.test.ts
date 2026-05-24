@@ -13,6 +13,7 @@ import type { ContextMeterService } from '../../src/chat/context-meter.service';
 import type { ChatStreamChunk } from '@argus/sdk';
 import type { WsFrameOutbound } from '@argus/contracts';
 import { randomUUID } from 'crypto';
+import { trace, type Span, type Tracer } from '@opentelemetry/api';
 
 const messageId = randomUUID();
 const conversationId = randomUUID();
@@ -363,10 +364,13 @@ describe('StreamOrchestrator', () => {
   describe('context meter on the complete terminal', () => {
     function meterStub(
       result: { tokensUsed: number; tokensBudget: number } | Error,
-    ): { svc: ContextMeterService; calls: { conversationId: string; userId: string }[] } {
-      const calls: { conversationId: string; userId: string }[] = [];
+    ): {
+      svc: ContextMeterService;
+      calls: { conversationId: string; userId: string; messageId?: string }[];
+    } {
+      const calls: { conversationId: string; userId: string; messageId?: string }[] = [];
       const svc = {
-        compute: async (input: { conversationId: string; userId: string }) => {
+        compute: async (input: { conversationId: string; userId: string; messageId?: string }) => {
           calls.push(input);
           if (result instanceof Error) throw result;
           return result;
@@ -395,7 +399,9 @@ describe('StreamOrchestrator', () => {
       const end = frames.find((f) => f.type === 'end')!;
       expect(end.type === 'end' && end.tokensUsed).toBe(250);
       expect(end.type === 'end' && end.tokensBudget).toBe(10000);
-      expect(meter.calls).toEqual([{ conversationId, userId }]);
+      // The orchestrator threads the turn's messageId so the meter's
+      // truncation event can correlate to this turn.
+      expect(meter.calls).toEqual([{ conversationId, userId, messageId }]);
     });
 
     it('meter throwing does NOT prevent the terminal end frame — both fields absent', async () => {
@@ -418,6 +424,60 @@ describe('StreamOrchestrator', () => {
       expect(end.type === 'end' && end.status).toBe('complete');
       expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
       expect(end.type === 'end' && end.tokensBudget).toBeUndefined();
+    });
+
+    // chat-context-and-ux-polish (Codex review — meter-failure observability).
+    // A meter throw must be queryable without Sentry: a structured log AND a
+    // span carrying llm.context_meter_failed=true.
+    it('on a meter throw, emits a structured log and a span with llm.context_meter_failed=true', async () => {
+      // Capture the span's attributes by spying on the tracer.
+      const setAttribute = jest.fn();
+      const fakeSpan = { setAttribute, end: jest.fn() } as unknown as Span;
+      const startSpan = jest.fn().mockReturnValue(fakeSpan);
+      const getTracer = jest
+        .spyOn(trace, 'getTracer')
+        .mockReturnValue({ startSpan } as unknown as Tracer);
+      const warn = jest
+        .spyOn(
+          (StreamOrchestrator as unknown as { logger: { warn: (m: string) => void } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      try {
+        const seqRegistry = new SeqCounterRegistry();
+        const { svc } = fakeChatService();
+        const meter = meterStub(new Error('meter blew up'));
+        const { emit, frames } = emitter();
+        const abort = new AbortController();
+        const o = new StreamOrchestrator(svc, seqRegistry, {
+          messageId,
+          conversationId,
+          userId: randomUUID(),
+          meter: meter.svc,
+          sdkStream: tokenStream(['a']),
+          abort,
+          emit,
+        });
+        await o.runStream();
+
+        // Structured log fired with the queryable attribute keyword.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0] as string).toContain('llm.context_meter_failed=true');
+        expect(warn.mock.calls[0]![0] as string).toContain(`messageId=${messageId}`);
+
+        // Span carries the attribute.
+        expect(startSpan).toHaveBeenCalledWith('chat.context_meter');
+        expect(setAttribute).toHaveBeenCalledWith('llm.context_meter_failed', true);
+        expect(setAttribute).toHaveBeenCalledWith('message.id', messageId);
+
+        // The end frame still ships (non-fatal) without context fields.
+        const end = frames.find((f) => f.type === 'end')!;
+        expect(end.type === 'end' && end.status).toBe('complete');
+        expect(end.type === 'end' && end.tokensUsed).toBeUndefined();
+      } finally {
+        warn.mockRestore();
+        getTracer.mockRestore();
+      }
     });
 
     it('meter never invoked on the failed terminal; end carries neither token field', async () => {

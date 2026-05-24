@@ -14,7 +14,7 @@
 //     no pin → configured default. Pinned + known catalog entry → min of
 //     default and pinned model's context window. Pinned + unknown entry →
 //     configured default (SDK accessor's documented tolerance).
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { SDK_CATALOG, type SdkCatalogAccessor } from '../common/sdk-catalog.provider';
 import { defaultContextBudget, estimateTokens } from '../common/token-heuristic';
@@ -27,10 +27,18 @@ export interface ContextMeterReadout {
 export interface ContextMeterInput {
   conversationId: string;
   userId: string;
+  /**
+   * Optional assistant message id for the in-flight turn. When present it's
+   * stamped onto the `chat.context.truncated` event so the truncation can be
+   * correlated to a specific turn in log search (HLD §Observability).
+   */
+  messageId?: string;
 }
 
 @Injectable()
 export class ContextMeterService {
+  private readonly logger = new Logger(ContextMeterService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(SDK_CATALOG) private readonly catalog: SdkCatalogAccessor,
@@ -49,18 +57,19 @@ export class ContextMeterService {
     const [messages, conv] = await Promise.all([
       this.prisma.db.message.findMany({
         where: { conversationId: input.conversationId, userId: input.userId },
-        // Only `content` is read for the meter. Avoid pulling the full row
-        // shape so a future column add doesn't bloat this query.
-        // (InMemoryPrisma's findMany doesn't honor `select` but production
-        // does; tests don't rely on field count.)
+        // Read content (for the token estimate) in chronological order so the
+        // truncation accounting below can drop oldest-first the same way the
+        // SDK's context builder (and computeOmittedCount) does.
+        orderBy: { createdAt: 'asc' },
       }),
       this.prisma.db.conversation.findFirst({
         where: { id: input.conversationId, userId: input.userId },
       }),
     ]);
 
+    const rows = messages as Array<{ content: string }>;
     let tokensUsed = 0;
-    for (const m of messages as Array<{ content: string }>) {
+    for (const m of rows) {
       tokensUsed += estimateTokens(m.content);
     }
 
@@ -76,6 +85,54 @@ export class ContextMeterService {
         : undefined;
     const tokensBudget = this.catalog.getEffectiveBudget(defaultBudget, pin);
 
+    // HLD §Observability — structured event when history is truncated to fit
+    // the budget. We mirror the drop-oldest-first / keep-newest heuristic the
+    // SDK's context builder uses (and computeOmittedCount in the REST path):
+    // count the leading messages that would be dropped, and the tokens they
+    // carry. Only emit when something is actually dropped so the dashboard
+    // count stays meaningful.
+    this.emitTruncationEventIfNeeded(rows, tokensBudget, input);
+
     return { tokensUsed, tokensBudget };
+  }
+
+  /**
+   * Compute how many leading (oldest) messages and tokens would be dropped to
+   * fit `tokensBudget` (keeping the newest message even if it alone exceeds
+   * the budget — the just-sent prompt is never dropped), and emit a structured
+   * `chat.context.truncated` warning when the count is > 0.
+   */
+  private emitTruncationEventIfNeeded(
+    rows: Array<{ content: string }>,
+    tokensBudget: number,
+    input: ContextMeterInput,
+  ): void {
+    if (rows.length <= 1) return;
+    let runningTokens = 0;
+    let keepCount = 0;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const cost = estimateTokens(rows[i]!.content);
+      if (keepCount === 0) {
+        runningTokens = cost;
+        keepCount = 1;
+        continue;
+      }
+      if (runningTokens + cost > tokensBudget) break;
+      runningTokens += cost;
+      keepCount += 1;
+    }
+    const turnsDropped = rows.length - keepCount;
+    if (turnsDropped <= 0) return;
+
+    let tokensDropped = 0;
+    for (let i = 0; i < turnsDropped; i++) {
+      tokensDropped += estimateTokens(rows[i]!.content);
+    }
+
+    this.logger.warn(
+      `chat.context.truncated conversationId=${input.conversationId}` +
+        (input.messageId ? ` messageId=${input.messageId}` : '') +
+        ` turns_dropped=${turnsDropped} tokens_dropped=${tokensDropped} tokens_budget=${tokensBudget}`,
+    );
   }
 }

@@ -19,6 +19,8 @@
 //
 // The orchestrator owns a single AbortController per invocation;
 // sdkStream.signal is the same controller's signal.
+import { Logger } from '@nestjs/common';
+import { trace } from '@opentelemetry/api';
 import type { ChatStreamChunk, ProviderMeta } from '@argus/sdk';
 import { ChatService } from './chat.service';
 import { SeqCounterRegistry } from './seq-counter';
@@ -59,6 +61,7 @@ export interface RunStreamInput {
 type Terminal = 'complete' | 'canceled' | 'failed' | 'disconnected';
 
 export class StreamOrchestrator {
+  private static readonly logger = new Logger(StreamOrchestrator.name);
   private terminal: Terminal | null = null;
   private partialContent = '';
   // chat-context-and-ux-polish LLD Task 43 — exactly-once metadata guard.
@@ -211,8 +214,27 @@ export class StreamOrchestrator {
       return await this.input.meter.compute({
         conversationId: this.input.conversationId,
         userId: this.input.userId,
+        // Thread the turn's messageId so the meter's truncation event can be
+        // correlated to this specific turn in log search.
+        messageId: this.input.messageId,
       });
     } catch (err) {
+      // chat-context-and-ux-polish (Codex review — meter-failure observability).
+      // The meter failure is non-fatal (the `end` frame still ships, just
+      // without context fields), but it must be QUERYABLE without going to
+      // Sentry: emit a structured log AND stamp `llm.context_meter_failed=true`
+      // on a span so it surfaces in Jaeger/log search. We capture to Sentry too
+      // (it's still an error worth alerting on), but the log + span attr are
+      // the operator's first-class signal.
+      StreamOrchestrator.logger.warn(
+        `llm.context_meter_failed=true conversationId=${this.input.conversationId} messageId=${this.input.messageId} reason=${errorMessageOf(err) ?? 'unknown'}`,
+      );
+      const tracer = trace.getTracer('@argus/api');
+      const span = tracer.startSpan('chat.context_meter');
+      span.setAttribute('llm.context_meter_failed', true);
+      span.setAttribute('message.id', this.input.messageId);
+      span.setAttribute('conversation.id', this.input.conversationId);
+      span.end();
       captureApiError({
         err,
         feature: 'chat',

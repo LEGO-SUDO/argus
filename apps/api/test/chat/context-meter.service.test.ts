@@ -131,3 +131,66 @@ describe('ContextMeterService.compute', () => {
     expect(out.tokensBudget).toBe(5000);
   });
 });
+
+// chat-context-and-ux-polish (HLD §Observability / Codex review) — a structured
+// chat.context.truncated event must fire when history exceeds the budget and
+// the oldest turns are dropped to fit; it must NOT fire when everything fits.
+describe('ContextMeterService.compute — truncation observability event', () => {
+  function spyWarn(svc: ContextMeterService): jest.SpyInstance {
+    const logger = (svc as unknown as { logger: { warn: (m: string) => void } }).logger;
+    return jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  }
+
+  it('emits chat.context.truncated with turns_dropped + tokens_dropped + messageId when over budget', async () => {
+    process.env.CONTEXT_TOKEN_BUDGET = '100';
+    const { svc, prisma } = build({ getEffectiveBudget: (d) => d });
+    const { userId, conversationId } = await seedConversation(prisma);
+    const warn = spyWarn(svc);
+    // Five 200-char messages → 50 tokens each. Budget 100 keeps newest two
+    // (50 + 50 = 100 fits) → 3 dropped, 150 tokens dropped.
+    for (let i = 0; i < 5; i++) {
+      prisma.messages.push({
+        id: randomUUID(),
+        conversationId,
+        userId,
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content: 'a'.repeat(200),
+        status: 'complete',
+        createdAt: new Date(Date.now() - (5 - i) * 1000),
+        completedAt: new Date(),
+      });
+    }
+    const messageId = randomUUID();
+    await svc.compute({ conversationId, userId, messageId });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const msg = warn.mock.calls[0]![0] as string;
+    expect(msg).toContain('chat.context.truncated');
+    expect(msg).toContain(`conversationId=${conversationId}`);
+    expect(msg).toContain(`messageId=${messageId}`);
+    expect(msg).toContain('turns_dropped=3');
+    expect(msg).toContain('tokens_dropped=150');
+    warn.mockRestore();
+  });
+
+  it('does NOT emit the event when the whole history fits the budget', async () => {
+    const { svc, prisma } = build({ getEffectiveBudget: (d) => d });
+    const { userId, conversationId } = await seedConversation(prisma);
+    const warn = spyWarn(svc);
+    // Two small messages, default 10000 budget — nothing dropped.
+    for (let i = 0; i < 2; i++) {
+      prisma.messages.push({
+        id: randomUUID(),
+        conversationId,
+        userId,
+        role: 'user',
+        content: 'hi',
+        status: 'complete',
+        createdAt: new Date(Date.now() - (2 - i) * 1000),
+        completedAt: new Date(),
+      });
+    }
+    await svc.compute({ conversationId, userId });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
