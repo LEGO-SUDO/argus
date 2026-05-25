@@ -25,7 +25,7 @@ export class LiveEventsConsumer {
 
   async start(brokers?: string[]): Promise<void> {
     if (this.consumer) return;
-    const list = brokers ?? (process.env.KAFKA_BROKERS ?? 'localhost:9092').split(',').map((s) => s.trim());
+    const list = brokers ?? (process.env.REDPANDA_BROKERS ?? 'redpanda:9092').split(',').map((s) => s.trim());
     const kafka = new Kafka({ clientId: 'argus-api-live-fanout', brokers: list });
     this.consumer = kafka.consumer({ groupId: this.config.liveEventsConsumerGroup });
     await this.consumer.connect();
