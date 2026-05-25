@@ -27,7 +27,12 @@ function apiOrigin(): string {
     ''
   ).replace(/\/+$/, '');
   if (configured) return configured;
-  return process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000';
+  // Hardcoded prod fallback so the proxy works even if Vercel doesn't surface
+  // the env var. This runs in the Node serverless runtime, so the fetch below
+  // resolves DNS normally (no edge DNS_HOSTNAME_RESOLVED_PRIVATE).
+  return process.env.NODE_ENV === 'production'
+    ? 'https://api-argus.duckdns.org'
+    : 'http://localhost:4000';
 }
 
 function copyRequestHeaders(headers: Headers): Headers {
