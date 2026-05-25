@@ -5,7 +5,7 @@
 //   - It NEVER touches `messages` — message status is owned synchronously
 //     by the API gateway. A lint-style test in
 //     projection.service.integration.test.ts greps this file and fails
-//     if `prisma.message` ever appears.
+//     if the forbidden messages-table accessor ever appears in the code.
 //
 // Per-span flow:
 //   1. Validate span shape (zod). Invalid → drop + Sentry recoverable=no.
@@ -49,13 +49,18 @@ import { mapSpanToProjection } from './span-mapper';
 import { decideInferenceWrite, type ExistingInferenceRow } from './failover-detector';
 import { tryInsertTraceEvent } from './idempotency-guard';
 import { capSpanEventPayload } from './payload-cap';
+import { evaluateClearFence } from './clear-fence';
+import { LiveEventsPublisher } from './live-events-publisher';
 import { captureProjectionError } from '../observability/sentry';
 
 @Injectable()
 export class ProjectionService {
   private readonly logger = new Logger(ProjectionService.name);
 
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly publisher: LiveEventsPublisher,
+  ) {}
 
   async handle(rawSpan: OtlpSpan): Promise<void> {
     const parse = OtlpSpanSchema.safeParse(rawSpan);
@@ -68,8 +73,34 @@ export class ProjectionService {
       });
       return;
     }
-    const span = parse.data;
+    // Phase B enrichment attributes (llm.kind + the FK attrs) are NOT declared
+    // in the contracts-owned OtelAttributesSchema, so zod strips them on parse.
+    // Re-attach the raw attribute map (same validated values, plus the Phase B
+    // keys) so the mapper can read them. extractSpans preserves the superset on
+    // the consumer path; direct callers pass spans that already carry the keys.
+    const rawAttrs = (rawSpan as { attributes?: Record<string, unknown> }).attributes;
+    const span: OtlpSpan = rawAttrs
+      ? { ...parse.data, attributes: { ...rawAttrs, ...parse.data.attributes } as OtlpSpan['attributes'] }
+      : parse.data;
     const projection = mapSpanToProjection(span);
+
+    // ---- 0. Clear-fence gate (HLD D8) ----
+    // Fires BEFORE the trace_events audit insert: a span the user has cleared
+    // must leave NO record (Hand-Off Risk §Clear-fence ordering vs audit).
+    const fence = await evaluateClearFence(
+      this.prisma,
+      projection.inference.userId,
+      projection.inference.startedAt,
+    );
+    if (fence.verdict === 'drop') {
+      this.logger.warn(
+        `[clear-fence] dropping span before fence — user_id=${projection.inference.userId} ` +
+          `trace_id=${span.traceId} span_id=${span.spanId} ` +
+          `started_at=${projection.inference.startedAt.toISOString()} ` +
+          `fence_ts=${fence.fenceTs.toISOString()}`,
+      );
+      return;
+    }
 
     try {
       // ---- 1. Idempotency gate via trace_events FIRST insert ----
@@ -86,11 +117,15 @@ export class ProjectionService {
       if (projection.traceEvents.length > 0) {
         const first = projection.traceEvents[0]!;
         const capped = capSpanEventPayload(first.payload);
-        const verdict = await tryInsertTraceEvent(this.prisma, {
-          ...first,
-          payload: capped.payload,
-          truncated: capped.truncated,
-        });
+        const verdict = await tryInsertTraceEvent(
+          this.prisma,
+          {
+            ...first,
+            payload: capped.payload,
+            truncated: capped.truncated,
+          },
+          projection.inference.kind,
+        );
         if (!verdict.proceeded && verdict.reason === 'duplicate') {
           this.logger.debug(
             `skip duplicate span trace_id=${span.traceId} span_id=${span.spanId} ` +
@@ -110,11 +145,15 @@ export class ProjectionService {
         : projection.traceEvents;
       for (const evt of remaining) {
         const capped = capSpanEventPayload(evt.payload);
-        await tryInsertTraceEvent(this.prisma, {
-          ...evt,
-          payload: capped.payload,
-          truncated: capped.truncated,
-        });
+        await tryInsertTraceEvent(
+          this.prisma,
+          {
+            ...evt,
+            payload: capped.payload,
+            truncated: capped.truncated,
+          },
+          projection.inference.kind,
+        );
       }
 
       // ---- 3. Inference write inside a transaction ----
@@ -153,6 +192,11 @@ export class ProjectionService {
               traceId: projection.inference.traceId,
               spanId: projection.inference.spanId,
               errorCode: projection.inference.errorCode,
+              // Phase B columns — written unconditionally from the mapper verdict.
+              kind: projection.inference.kind,
+              classifierForMessageId: projection.inference.classifierForMessageId,
+              replayOfInferenceId: projection.inference.replayOfInferenceId,
+              sampleWorkspaceId: projection.inference.sampleWorkspaceId,
             },
           });
           return;
@@ -198,8 +242,26 @@ export class ProjectionService {
             traceId: projection.inference.traceId,
             spanId: projection.inference.spanId,
             errorCode: projection.inference.errorCode,
+            // Phase B columns — written unconditionally from the mapper verdict.
+            kind: projection.inference.kind,
+            classifierForMessageId: projection.inference.classifierForMessageId,
+            replayOfInferenceId: projection.inference.replayOfInferenceId,
+            sampleWorkspaceId: projection.inference.sampleWorkspaceId,
           },
         });
+      });
+
+      // ---- 4. Post-commit live-events publish (HLD D3) ----
+      // We only reach this point when the trace_events idempotency gate did NOT
+      // short-circuit (a duplicate redelivery returns early above), so a
+      // redelivery never double-publishes. The publish is AWAITED so a
+      // synchronous failure surfaces in-batch, but the publisher swallows its
+      // own kafkajs errors internally — a Kafka outage degrades to a missed
+      // tick (Sentry recoverable=yes), it never rolls back the committed write.
+      await this.publisher.publish({
+        user_id: projection.inference.userId,
+        kind: projection.inference.kind,
+        conversation_id: projection.inference.conversationId,
       });
     } catch (err) {
       captureProjectionError({

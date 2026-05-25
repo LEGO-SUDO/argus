@@ -8,13 +8,18 @@ import { SdkCatalogProvider } from '../common/sdk-catalog.provider';
 import { SdkChatStreamProvider } from '../common/sdk-chat.provider';
 import { AuthModule } from '../auth/auth.module';
 import { ConversationsModule } from '../conversations/conversations.module';
+import { AutoModule } from '../auto/auto.module';
 
+// OrchestratorRegistry is provided by the @Global OrchestratorModule (imported
+// once in AppModule), so the gateway resolves it without an explicit import.
 @Module({
   // forwardRef breaks the chat ↔ conversations cycle: the gateway needs
   // ConversationsRepository; the conversations controller needs
   // ContextMeterService (which chat owns). See conversations.module.ts for
   // the matching forwardRef on the other side.
-  imports: [AuthModule, forwardRef(() => ConversationsModule)],
+  // AutoModule (Phase B) exports AutoRouterService, which the gateway injects
+  // to resolve `auto` provider selections into a classifier-driven decision.
+  imports: [AuthModule, forwardRef(() => ConversationsModule), AutoModule],
   providers: [
     ChatService,
     ChatGateway,

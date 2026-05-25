@@ -6,5 +6,5 @@
     "composite": false,
     "types": ["node", "jest"]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "__tests__/**/*"]
 }

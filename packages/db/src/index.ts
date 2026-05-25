@@ -34,4 +34,8 @@ export type {
   TraceEvent,
   MessageStatus,
   InferenceStatus,
+  // Phase B
+  InferenceKind,
+  SampleWorkspace,
+  UserClearFence,
 } from '@prisma/client';

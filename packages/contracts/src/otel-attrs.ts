@@ -25,7 +25,18 @@ export const OTEL_ATTRS = {
   USER_ID: 'user.id',
   MESSAGE_ID: 'message.id',
   TURN_INDEX: 'turn.index',
-  // chat-context-and-ux-polish LLD Task 34 — context meter + pin telemetry.
+  // ---- Phase B (control plane) ----
+  // `llm.kind` partitions every inference row by its origin so the operator
+  // console can exclude replay/sample/classifier/heartbeat from the default
+  // aggregates. Set by the SDK span / heartbeat emitter; read by the
+  // projection consumer into `trace_events.kind` + `inferences.kind`.
+  LLM_KIND: 'llm.kind',
+  LLM_SAMPLE_WORKSPACE_ID: 'llm.sample_workspace_id',
+  LLM_REPLAY_OF_INFERENCE_ID: 'llm.replay_of_inference_id',
+  // Canonical name is `_for_` (matches DB column `classifier_for_message_id`).
+  LLM_CLASSIFIER_FOR_MESSAGE_ID: 'llm.classifier_for_message_id',
+  // ---- chat-context-and-ux-polish (PR #5) ----
+  // LLD Task 34 — context meter + pin telemetry.
   // The gateway threads `effectiveBudget` + `contextWindowCap` onto each SDK
   // request as observability hints; the span stamps them. `pinned_failure`
   // is true iff the request failed with the override-branch error code
@@ -38,6 +49,35 @@ export const OTEL_ATTRS = {
   LLM_PINNED_FAILURE: 'llm.pinned_failure',
   LLM_GUESS_COMMIT_DIVERGENT: 'llm.guess_commit_divergent',
 } as const;
+
+// Phase B attribute-key constants, also exported standalone so call sites can
+// `import { LLM_KIND } from '@argus/contracts'` without reaching into the
+// OTEL_ATTRS object. Same string values as the OTEL_ATTRS members above.
+export const LLM_KIND = OTEL_ATTRS.LLM_KIND;
+export const LLM_SAMPLE_WORKSPACE_ID = OTEL_ATTRS.LLM_SAMPLE_WORKSPACE_ID;
+export const LLM_REPLAY_OF_INFERENCE_ID = OTEL_ATTRS.LLM_REPLAY_OF_INFERENCE_ID;
+export const LLM_CLASSIFIER_FOR_MESSAGE_ID = OTEL_ATTRS.LLM_CLASSIFIER_FOR_MESSAGE_ID;
+
+// Canonical inference-kind values. Single source of truth for both the OTel
+// `llm.kind` attribute schema and the live-events / console contracts.
+//   chat       a real user turn (the only kind in default aggregates)
+//   classifier the Auto-router one-shot classification call
+//   replay     a re-run of a prior inference from the Replay tab
+//   sample     a Generate-Samples demo turn (always against mock)
+//   heartbeat  a synthetic ingestion-health span (live-badge truth source)
+//   unknown    an unrecognized `llm.kind` value (version skew)
+export const LLM_KIND_VALUES = [
+  'chat',
+  'classifier',
+  'replay',
+  'sample',
+  'heartbeat',
+  'unknown',
+] as const;
+
+// Schema for the `llm.kind` attribute value (enum literal).
+export const OtelLlmKindAttributeSchema = z.enum(LLM_KIND_VALUES);
+export type OtelLlmKind = z.infer<typeof OtelLlmKindAttributeSchema>;
 
 export const SPAN_EVENT_NAMES = {
   LLM_INPUT: 'llm.input',

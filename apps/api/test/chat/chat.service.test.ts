@@ -103,6 +103,69 @@ describe('ChatService', () => {
       expect(inference?.completionTokens).toBeNull();
       expect(inference?.userId).toBe(userId);
     });
+
+    it('defaults kind=chat with all linkage columns null (Phase A back-compat)', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const { assistantMessageId } = await svc.startTurn({ userId, conversationId, userMessageContent: 'hi' });
+      const inf = prisma.inferences.find((i) => i.messageId === assistantMessageId)!;
+      expect(inf.kind).toBe('chat');
+      expect(inf.classifierForMessageId).toBeNull();
+      expect(inf.replayOfInferenceId).toBeNull();
+      expect(inf.sampleWorkspaceId).toBeNull();
+    });
+
+    it('kind=replay sets replayOfInferenceId on the placeholder row', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const sourceId = randomUUID();
+      const { assistantMessageId } = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'rerun',
+        kind: 'replay',
+        replayOfInferenceId: sourceId,
+      });
+      const inf = prisma.inferences.find((i) => i.messageId === assistantMessageId)!;
+      expect(inf.kind).toBe('replay');
+      expect(inf.replayOfInferenceId).toBe(sourceId);
+    });
+
+    it('kind=sample sets sampleWorkspaceId on the placeholder row', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const workspaceId = randomUUID();
+      const { assistantMessageId } = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'sample',
+        kind: 'sample',
+        sampleWorkspaceId: workspaceId,
+      });
+      const inf = prisma.inferences.find((i) => i.messageId === assistantMessageId)!;
+      expect(inf.kind).toBe('sample');
+      expect(inf.sampleWorkspaceId).toBe(workspaceId);
+    });
+
+    it('kind=classifier sets classifierForMessageId on the placeholder row', async () => {
+      const prisma = createInMemoryPrisma();
+      const svc = build(prisma);
+      const { userId, conversationId } = await seedUserAndConv(prisma);
+      const userMsgId = randomUUID();
+      const { assistantMessageId } = await svc.startTurn({
+        userId,
+        conversationId,
+        userMessageContent: 'classify',
+        kind: 'classifier',
+        classifierMessageId: userMsgId,
+      });
+      const inf = prisma.inferences.find((i) => i.messageId === assistantMessageId)!;
+      expect(inf.kind).toBe('classifier');
+      expect(inf.classifierForMessageId).toBe(userMsgId);
+    });
   });
 
   describe('completeTurn', () => {

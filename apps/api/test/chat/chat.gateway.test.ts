@@ -24,6 +24,8 @@ import { ConversationsRepository } from '../../src/conversations/conversations.r
 import { PrismaService } from '../../src/common/prisma.service';
 import { AuthService } from '../../src/auth/auth.service';
 import { SessionRepository } from '../../src/auth/session.repository';
+import { AutoRouterService } from '../../src/auto/auto-router.service';
+import { OrchestratorRegistry } from '../../src/orchestrator/registry';
 import type { SdkCatalogAccessor } from '../../src/common/sdk-catalog.provider';
 import type { SdkChatStreamFn } from '../../src/common/sdk-chat.provider';
 import { createInMemoryPrisma, InMemoryPrisma } from '../fixtures/prisma-test-client';
@@ -59,12 +61,19 @@ function fakeClient(userId: string): FakeClient {
 interface BuildOptions {
   catalog?: Partial<SdkCatalogAccessor>;
   sdkStream?: SdkChatStreamFn;
+  // Phase B: override the Auto router so `provider: 'auto'` tests can assert
+  // the routing decision flows into the SDK request's pin.
+  autoRouter?: Pick<AutoRouterService, 'route'>;
 }
 
 interface BuildResult {
   gateway: ChatGateway;
   prisma: InMemoryPrisma;
   capturedRequests: ChatStreamRequest[];
+  // Phase B: the global orchestrator registry so the registration tests can
+  // observe in-flight handles.
+  registry: OrchestratorRegistry;
+  autoRouter: Pick<AutoRouterService, 'route'>;
 }
 
 function build(prisma: InMemoryPrisma, opts: BuildOptions = {}): BuildResult {
@@ -81,6 +90,11 @@ function build(prisma: InMemoryPrisma, opts: BuildOptions = {}): BuildResult {
       opts.catalog?.getEffectiveBudget ?? ((configuredDefault) => configuredDefault),
   };
   const meter = new ContextMeterService(ps, accessor);
+  // Phase B collaborators: registry (global, shared) + Auto router (mockable).
+  const registry = new OrchestratorRegistry();
+  const autoRouter: Pick<AutoRouterService, 'route'> =
+    opts.autoRouter ??
+    { route: jest.fn(async () => ({ provider: 'anthropic' as const, classifierInferenceId: null })) };
   const capturedRequests: ChatStreamRequest[] = [];
   // Default SDK stream stub: capture the request, emit a normal commit →
   // token → done stream so the orchestrator runs end-to-end.
@@ -108,12 +122,14 @@ function build(prisma: InMemoryPrisma, opts: BuildOptions = {}): BuildResult {
     auth,
     conversations,
     meter,
+    autoRouter as AutoRouterService,
+    registry,
     accessor,
     sdkStream,
   );
   // Trigger onModuleInit so the cached guess is set (matches Nest's lifecycle).
   gateway.onModuleInit();
-  return { gateway, prisma, capturedRequests };
+  return { gateway, prisma, capturedRequests, registry, autoRouter };
 }
 
 /** Helper: wait for the fire-and-forget orchestrator chain to settle. */
@@ -122,6 +138,23 @@ async function tick(times = 8): Promise<void> {
     await new Promise((r) => setImmediate(r));
   }
 }
+
+function seedUserWithConversation(prisma: InMemoryPrisma): { userId: string; conversationId: string } {
+  const userId = randomUUID();
+  const conversationId = randomUUID();
+  prisma.users.push({ id: userId, email: `${userId}@t`, passwordHash: 'x', createdAt: new Date() });
+  prisma.conversations.push({ id: conversationId, userId, title: 't', createdAt: new Date(), lastMessageAt: null });
+  return { userId, conversationId };
+}
+
+function callHandleSend(gateway: ChatGateway, client: unknown, data: unknown, frame: unknown): Promise<void> {
+  return (
+    gateway as unknown as { handleSend: (c: unknown, d: unknown, f: unknown) => Promise<void> }
+  ).handleSend(client, data, frame);
+}
+
+// Wait for the fire-and-forget orchestrator run + its finally() to settle.
+const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 
 describe('ChatGateway.handleSend — pre-orchestrator failure terminals', () => {
   it('on unknown conversationId emits error + end(status=failed) sharing the same minted messageId', async () => {
@@ -212,6 +245,130 @@ describe('ChatGateway.handleSend — pre-orchestrator failure terminals', () => 
     if (errorFrame!.type === 'error' && endFrame!.type === 'end') {
       expect(endFrame.messageId).toBe(errorFrame.messageId);
     }
+  });
+});
+
+// Phase B (control plane) — Auto routing + orchestrator registration.
+//
+// Post-merge note: PR #5 (chat-context-and-ux-polish) made the `start` frame
+// identity-only (provider/model migrated to the `metadata` frame, sourced from
+// the SDK `commit` chunk) AND moved provider selection onto the SDK request's
+// `pin`. So Phase B's four-option `provider` selector now flows into the SDK
+// request's pin (lowest precedence) rather than onto the start frame. These
+// tests assert the merged reality: the Auto router's decision shows up as the
+// pin (and, via the default stub's commit, on the metadata frame).
+describe('ChatGateway.handleSend — Phase B provider routing + registration', () => {
+  it('provider="auto" invokes the Auto router before streaming; resolved provider flows into the SDK pin + metadata', async () => {
+    const prisma = createInMemoryPrisma();
+    const route = jest.fn(async () => ({ provider: 'anthropic' as const, classifierInferenceId: null }));
+    const { gateway, capturedRequests } = build(prisma, { autoRouter: { route } });
+    const { userId, conversationId } = seedUserWithConversation(prisma);
+    const client = fakeClient(userId);
+
+    await callHandleSend(gateway, client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      provider: 'auto',
+    });
+    await flush();
+
+    expect(route).toHaveBeenCalledTimes(1);
+    // The Auto decision is threaded as the (lowest-precedence) SDK pin.
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]!.pin?.provider).toBe('anthropic');
+    // And the default stub commits that provider, so it surfaces on metadata.
+    const meta = client.sent.find((f) => f.type === 'metadata');
+    expect(meta && meta.type === 'metadata' && meta.providerMeta.provider).toBe('anthropic');
+  });
+
+  it('a concrete provider bypasses the Auto router and is threaded as the SDK pin unchanged', async () => {
+    const prisma = createInMemoryPrisma();
+    const route = jest.fn(async () => ({ provider: 'anthropic' as const, classifierInferenceId: null }));
+    const { gateway, capturedRequests } = build(prisma, { autoRouter: { route } });
+    const { userId, conversationId } = seedUserWithConversation(prisma);
+    const client = fakeClient(userId);
+
+    await callHandleSend(gateway, client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      provider: 'openai',
+    });
+    await flush();
+
+    expect(route).not.toHaveBeenCalled();
+    expect(capturedRequests[0]!.pin?.provider).toBe('openai');
+  });
+
+  it('an explicit send-frame pin wins over the four-option provider selector', async () => {
+    // Both a `provider` selector AND a `pinnedProvider`/`pinnedModel` pair are
+    // present; the precise pin must win (the selector is lowest precedence).
+    const prisma = createInMemoryPrisma();
+    const { gateway, capturedRequests } = build(prisma, {
+      catalog: {
+        listConfiguredProviders: () => [
+          {
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+            promptPerMillion: 0,
+            completionPerMillion: 0,
+            contextWindow: 128_000,
+          },
+        ],
+      },
+    });
+    const { userId, conversationId } = seedUserWithConversation(prisma);
+    const client = fakeClient(userId);
+
+    await callHandleSend(gateway, client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      provider: 'anthropic',
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    await flush();
+
+    expect(capturedRequests[0]!.pin).toEqual({ provider: 'openai', model: 'gpt-4o-mini' });
+  });
+
+  it('registers a handle on send and deregisters it when the stream terminates', async () => {
+    const prisma = createInMemoryPrisma();
+    // A stream we hold open so we can observe the handle mid-flight.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const heldSdk: SdkChatStreamFn = () => ({
+      async *[Symbol.asyncIterator](): AsyncIterator<ChatStreamChunk> {
+        yield { type: 'commit', providerMeta: { provider: 'mock', model: 'mock-1' } };
+        yield { type: 'token', content: 'x' };
+        await gate;
+        yield { type: 'done', providerMeta: { provider: 'mock', model: 'mock-1' } };
+      },
+    });
+    const { gateway, registry } = build(prisma, { sdkStream: heldSdk });
+    const { userId, conversationId } = seedUserWithConversation(prisma);
+    const client = fakeClient(userId);
+
+    await callHandleSend(gateway, client, client.data, {
+      type: 'send',
+      conversationId,
+      content: 'hi',
+      provider: 'mock',
+    });
+
+    // Mid-flight: exactly one chat handle registered for this user.
+    const inflight = registry.list(userId);
+    expect(inflight).toHaveLength(1);
+    expect(inflight[0]!.kind).toBe('chat');
+
+    // Let the stream finish; the finally() deregisters.
+    release();
+    await flush();
+    expect(registry.list(userId)).toEqual([]);
   });
 });
 
