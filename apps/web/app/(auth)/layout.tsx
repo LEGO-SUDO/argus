@@ -10,6 +10,7 @@
 // desktop-targeted.
 
 import { Wordmark } from '@/components/brand/Wordmark';
+import { AuthFormSheet } from '@/components/auth/AuthFormSheet';
 
 type AuthLayoutProps = {
   children: React.ReactNode;
@@ -45,28 +46,23 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
             Observe <em className="italic text-acc">everything</em>.
           </h1>
           <p className="m-0 text-[14px] leading-[1.55] text-chat-ink-2">
-            A streaming multi-provider chatbot stitched to an inference-logging
+            A streaming, multi-provider chat app wired to an inference-logging
             pipeline. Every model call from{' '}
             <span className="mono" style={{ fontSize: 13 }}>
               /chat
             </span>{' '}
-            shows up in the operator console within ~5 seconds — same data,
-            three lenses.
+            lands in the operator console within ~5 seconds — traces, cost, and
+            replay over the same data.
           </p>
         </div>
 
         <div className="mt-10 flex justify-between text-[11.5px] text-chat-ink-3">
-          <span className="mono">v0.1.0 · mock-stream-v1</span>
+          <span className="mono">otel → redpanda → postgres</span>
           <span>argus</span>
         </div>
       </aside>
 
-      <main
-        data-testid="auth-form-wrap"
-        className="flex items-center justify-center p-10"
-      >
-        <div className="w-[360px] max-w-full">{children}</div>
-      </main>
+      <AuthFormSheet>{children}</AuthFormSheet>
     </div>
   );
 }

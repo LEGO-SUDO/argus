@@ -16,6 +16,8 @@ import { usePathname } from 'next/navigation';
 import { useMemo } from 'react';
 import type { ConversationDto } from '@argus/contracts';
 
+import { SurfaceSwitch } from './SurfaceSwitch';
+
 type ChatTopbarProps = {
   conversations: ConversationDto[];
   /** Mobile-drawer toggle (only rendered below md). The parent owns the
@@ -82,13 +84,13 @@ export function ChatTopbar({
         </div>
       </div>
 
-      {/* Phase B surface-switch (chat / console pill) slot. Leave empty
-       *  today; Phase B mounts <SurfaceSwitch /> here. */}
+      {/* Surface-switch (chat / console pill) — the way to reach /console. */}
       <div
         data-testid="chat-topbar-surface-switch-slot"
-        aria-hidden="true"
         className="flex items-center gap-2"
-      />
+      >
+        <SurfaceSwitch />
+      </div>
     </header>
   );
 }
