@@ -1,9 +1,13 @@
-// TracesFilterBar — composes the five filter sub-controls + clear-all and
-// emits a single AND-combined TracesFilter on any sub-change (LLD Tasks 102-105).
+// TracesFilterBar — inline filter row reskinned to the .con-tools design
+// language (REVIEW-BRIEF Finding 4, LLD Tasks 102-105).
 //
-// Controlled: the parent owns the `value`; each sub-control change merges into
-// the current value and emits the combined object. Clear-all emits the empty
-// filter (which, because the bar is controlled, also resets every sub-control).
+// Previously a card panel; now a thin toolbar (flex row) that lives INSIDE
+// .con-tools. The parent TracesTab owns the .con-tools wrapper and also renders
+// the window-switch alongside this bar, so this component renders only its
+// portion: the multi-select triggers + search + spacer + clear-all.
+//
+// All behaviour is unchanged: controlled, AND-combined filter, clear-all emits
+// the empty filter. All data-testids are preserved.
 
 'use client';
 
@@ -35,15 +39,7 @@ export function TracesFilterBar({
   const patch = (partial: Partial<TracesFilter>) => onChange({ ...value, ...partial });
 
   return (
-    <div
-      data-testid="console-traces-filter-bar"
-      className="flex flex-col gap-3 rounded-md border border-chat-rule bg-chat-panel p-3"
-    >
-      <FreeTextSearchInput
-        initialValue={value.search}
-        debounceMs={searchDebounceMs}
-        onChange={(search) => patch({ search })}
-      />
+    <>
       <ProviderMultiSelect
         selected={value.provider}
         onChange={(provider) => patch({ provider })}
@@ -62,9 +58,18 @@ export function TracesFilterBar({
         selected={value.conversationId}
         onChange={(conversationId) => patch({ conversationId })}
       />
-      <div className="flex justify-end">
-        <ClearAllFiltersButton onClear={() => onChange(emptyTracesFilter())} />
-      </div>
-    </div>
+      <FreeTextSearchInput
+        initialValue={value.search}
+        debounceMs={searchDebounceMs}
+        onChange={(search) => patch({ search })}
+      />
+      <div
+        className="spacer"
+        role="presentation"
+        aria-hidden="true"
+        data-testid="console-traces-filter-bar"
+      />
+      <ClearAllFiltersButton onClear={() => onChange(emptyTracesFilter())} />
+    </>
   );
 }

@@ -1,6 +1,9 @@
 // ClearAllFiltersButton — emits the empty-filter event (LLD Tasks 100-101).
+// Reskinned to .filter-chip styling (REVIEW-BRIEF Finding 4).
 
 'use client';
+
+import { Icon } from '../Icon';
 
 export type ClearAllFiltersButtonProps = {
   onClear: () => void;
@@ -15,9 +18,11 @@ export function ClearAllFiltersButton({ onClear, disabled }: ClearAllFiltersButt
       aria-label="Clear all filters"
       onClick={() => onClear()}
       disabled={disabled}
-      className="min-h-8 rounded-[6px] px-2.5 py-1 text-[12px] font-medium text-chat-ink-2 underline-offset-2 hover:text-chat-ink hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-acc disabled:cursor-not-allowed disabled:opacity-40"
+      className="filter-chip"
+      style={{ color: 'var(--con-dim-2)', opacity: disabled ? 0.4 : 1, cursor: disabled ? 'not-allowed' : undefined }}
     >
-      Clear all filters
+      <Icon name="x" size={9} aria-hidden="true" />
+      clear
     </button>
   );
 }

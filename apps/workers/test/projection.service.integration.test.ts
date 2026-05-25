@@ -339,6 +339,88 @@ describeIntegration('ProjectionService.handle (integration)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // REVIEW-BRIEF Finding 1: previews are derived from span body events when the
+  // producer omits llm.input_preview / llm.output_preview attributes.
+  //
+  // On the real wire the body string rides as event.attributes.body (not
+  // event.body). The input body is JSON {"messages":[…]}; the output body is
+  // the assistant text verbatim. The mapper must extract the last user message
+  // as input_preview and the raw string as output_preview.
+  // -------------------------------------------------------------------------
+  it('derives input_preview and output_preview from span body events when preview attributes are absent', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+    const messageId = randomUUID();
+    const inferenceId = await seedPlaceholderInference({
+      messageId,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+
+    const startMs = Date.now();
+    // Build a span that deliberately omits llm.input_preview / llm.output_preview
+    // and carries the body as event.attributes.body — the real-wire shape.
+    const span: OtlpSpan = {
+      traceId: 'trace-' + randomUUID(),
+      spanId: 'span-' + randomUUID(),
+      name: 'llm.chat.stream',
+      startTimeUnixNano: String(startMs * 1_000_000),
+      endTimeUnixNano: String((startMs + 800) * 1_000_000),
+      attributes: {
+        [OTEL_ATTRS.LLM_PROVIDER]: 'openai',
+        [OTEL_ATTRS.LLM_MODEL]: 'gpt-4o-mini',
+        [OTEL_ATTRS.LLM_PROMPT_TOKENS]: 120,
+        [OTEL_ATTRS.LLM_COMPLETION_TOKENS]: 12,
+        [OTEL_ATTRS.LLM_STATUS]: 'ok',
+        [OTEL_ATTRS.LLM_PROMPT_COST_USD_MICROS]: 1800,
+        [OTEL_ATTRS.LLM_COMPLETION_COST_USD_MICROS]: 240,
+        // No LLM_INPUT_PREVIEW — not set by the producer.
+        // No LLM_OUTPUT_PREVIEW — not set by the producer.
+        [OTEL_ATTRS.CONVERSATION_ID]: conversationId,
+        [OTEL_ATTRS.USER_ID]: userId,
+        [OTEL_ATTRS.MESSAGE_ID]: messageId,
+        [OTEL_ATTRS.TURN_INDEX]: 0,
+      } as unknown as OtlpSpan['attributes'],
+      events: [
+        {
+          name: SPAN_EVENT_NAMES.LLM_INPUT,
+          // Real-wire shape: body string is nested under attributes.body
+          attributes: {
+            body: JSON.stringify({
+              messages: [
+                { role: 'system', content: 'You are a helpful geography assistant.' },
+                { role: 'user', content: 'what is the capital of France?' },
+              ],
+            }),
+            truncated: false,
+          },
+        },
+        {
+          name: SPAN_EVENT_NAMES.LLM_OUTPUT,
+          // Real-wire shape: output body is the assistant text verbatim
+          attributes: {
+            body: 'The capital of France is Paris.',
+            truncated: false,
+          },
+        },
+      ],
+    };
+
+    await service.handle(span);
+
+    const enriched = await env.prisma.inference.findUnique({ where: { id: inferenceId } });
+    expect(enriched).not.toBeNull();
+    // Core Finding 1 assertions: both columns must be non-null and human-readable.
+    expect(enriched?.inputPreview).toBe('what is the capital of France?');
+    expect(enriched?.outputPreview).toBe('The capital of France is Paris.');
+    // Sanity: other numeric columns were still written.
+    expect(enriched?.promptTokens).toBe(120);
+    expect(enriched?.completionTokens).toBe(12);
+    expect(enriched?.status).toBe('ok');
+  });
+
+  // -------------------------------------------------------------------------
   // Belt-and-braces: source code does not import the messages Prisma delegate.
   // -------------------------------------------------------------------------
   it('ProjectionService source code never references prisma.message (ownership boundary lint)', () => {

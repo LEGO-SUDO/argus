@@ -16,7 +16,7 @@ export function DiffToggle({ mode, onChange }: DiffToggleProps) {
       data-testid="console-replay-diff-toggle"
       role="group"
       aria-label="Diff view mode"
-      className="inline-flex items-center rounded-[6px] border border-chat-rule p-0.5"
+      className="inline-flex items-center rounded-[6px] border border-con-rule p-0.5"
     >
       {(['raw', 'diff'] as const).map((option) => (
         <button
@@ -27,7 +27,7 @@ export function DiffToggle({ mode, onChange }: DiffToggleProps) {
           aria-label={`${option} view`}
           onClick={() => onChange(option)}
           className={`min-h-8 rounded-[5px] px-2.5 py-1 text-[12px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-acc ${
-            mode === option ? 'bg-chat-ink text-chat-bg' : 'text-chat-ink-2 hover:bg-chat-hover'
+            mode === option ? 'bg-con-text text-con-bg' : 'text-con-dim hover:bg-con-hover'
           }`}
         >
           {option === 'raw' ? 'Raw' : 'Diff'}

@@ -21,7 +21,7 @@ function variantOf(change: DiffChange): 'added' | 'removed' | 'unchanged' {
 const CLASS: Record<string, string> = {
   added: 'font-semibold text-ok underline decoration-dotted',
   removed: 'text-err line-through',
-  unchanged: 'text-chat-ink',
+  unchanged: 'text-con-text',
 };
 
 export function DiffRenderer({ changes }: DiffRendererProps) {

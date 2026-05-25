@@ -3,6 +3,11 @@
 // Mocks the data fetch, the live-tick context, and next/navigation so we can
 // assert URL-sync-on-mount, debounced filter-change refetch, and SSE-tick
 // refetch coalescing without a real provider / router.
+//
+// Reskin delta: provider/model/status/conversation filters are now in a
+// dropdown (trigger → chip list). Tests open the trigger first before clicking
+// individual chips — behavioral coverage is unchanged, interaction is more
+// realistic. The data-testid for individual chips is preserved.
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
 const mockReplace = jest.fn();
@@ -17,7 +22,7 @@ jest.mock('next/navigation', () => ({
 jest.mock('@/lib/use-console-live', () => ({
   useConsoleLive: () => ({ latestTick: null, subscribe: mockSubscribe }),
 }));
-jest.mock('@/lib/console-api', () => ({ fetchTraces: jest.fn() }));
+jest.mock('@/lib/console-api', () => ({ fetchTraces: jest.fn(), generateSample: jest.fn() }));
 
 import { fetchTraces } from '@/lib/console-api';
 import { TracesTab } from '@/components/console/traces/TracesTab';
@@ -42,27 +47,37 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+/** Open a filter-chip dropdown trigger by its group label, then return the
+ *  individual chip button for the given value. */
+function openAndGetChip(triggerTestId: string, chipTestId: string): HTMLElement {
+  // Click the trigger to open the dropdown
+  fireEvent.click(screen.getByTestId(triggerTestId));
+  return screen.getByTestId(chipTestId);
+}
+
 describe('<TracesTab /> URL sync on mount (Task 118)', () => {
   it('rehydrates the filter from URL params', () => {
     render(
       <TracesTab
         initialData={EMPTY_DATA}
         initialWindow="24h"
-        initialSearchParams={new URLSearchParams('provider=openai')}
+        initialFilter={{
+          provider: ['openai'],
+          model: [],
+          status: [],
+          conversationId: [],
+          search: '',
+        }}
       />,
     );
-    expect(screen.getByTestId('console-filter-provider-openai')).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    const chip = openAndGetChip('console-filter-provider-trigger', 'console-filter-provider-openai');
+    expect(chip).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('leaves the bar empty with no params', () => {
     render(<TracesTab initialData={EMPTY_DATA} initialWindow="24h" />);
-    expect(screen.getByTestId('console-filter-provider-openai')).toHaveAttribute(
-      'aria-pressed',
-      'false',
-    );
+    const chip = openAndGetChip('console-filter-provider-trigger', 'console-filter-provider-openai');
+    expect(chip).toHaveAttribute('aria-pressed', 'false');
   });
 });
 
@@ -71,6 +86,8 @@ describe('<TracesTab /> debounced filter refetch (Task 120)', () => {
     render(
       <TracesTab initialData={EMPTY_DATA} initialWindow="24h" refetchDebounceMs={200} />,
     );
+    // Open provider dropdown
+    fireEvent.click(screen.getByTestId('console-filter-provider-trigger'));
     fireEvent.click(screen.getByTestId('console-filter-provider-openai'));
     fireEvent.click(screen.getByTestId('console-filter-provider-anthropic'));
     fireEvent.click(screen.getByTestId('console-filter-provider-gemini'));

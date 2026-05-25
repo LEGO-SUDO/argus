@@ -43,7 +43,7 @@ export default async function TracesPage({
 
   return (
     <Suspense>
-      <TracesTab initialData={data} initialWindow={window} initialSearchParams={params} />
+      <TracesTab initialData={data} initialWindow={window} initialFilter={filter} />
     </Suspense>
   );
 }

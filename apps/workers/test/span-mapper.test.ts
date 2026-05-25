@@ -95,6 +95,46 @@ describe('mapSpanToProjection', () => {
     expect(result.inference.errorCode).toBe('client_disconnected');
   });
 
+  // REVIEW-BRIEF Finding 1: production NEVER sets the llm.*_preview attributes;
+  // the SDK only emits the body as span EVENTS, where on the real wire the body
+  // string is nested under the `body` event attribute. The mapper must derive
+  // both preview columns from those events, or Replay's original pane and Traces
+  // content-search read NULL. This span omits the preview attributes on purpose.
+  it('derives both previews from the body events when no preview attribute is set', () => {
+    const base = makeSpan();
+    const attrs = { ...base.attributes };
+    delete (attrs as Record<string, unknown>)[OTEL_ATTRS.LLM_INPUT_PREVIEW];
+    delete (attrs as Record<string, unknown>)[OTEL_ATTRS.LLM_OUTPUT_PREVIEW];
+    const span = makeSpan({
+      attributes: attrs,
+      // Real-wire shape: the payload string rides as the `body` event attribute
+      // (input = JSON of the messages; output = the assistant text verbatim).
+      events: [
+        {
+          name: SPAN_EVENT_NAMES.LLM_INPUT,
+          attributes: {
+            body: JSON.stringify({
+              messages: [
+                { role: 'system', content: 'be terse' },
+                { role: 'user', content: 'what is the capital of France?' },
+              ],
+            }),
+            truncated: false,
+          },
+        },
+        {
+          name: SPAN_EVENT_NAMES.LLM_OUTPUT,
+          attributes: { body: 'The capital of France is Paris.', truncated: false },
+        },
+      ],
+    });
+
+    const result = mapSpanToProjection(span);
+    // input preview = the triggering user message, not the system prompt or raw JSON.
+    expect(result.inference.inputPreview).toBe('what is the capital of France?');
+    expect(result.inference.outputPreview).toBe('The capital of France is Paris.');
+  });
+
   it('handles missing optional cost/token attributes gracefully', () => {
     const base = makeSpan();
     const attrs = { ...base.attributes };

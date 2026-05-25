@@ -34,10 +34,10 @@ export function UnpricedBadge({ count, models }: UnpricedBadgeProps) {
         <ul
           data-testid="console-unpriced-badge-popover"
           role="list"
-          className="absolute left-0 top-full z-10 mt-1 max-h-40 min-w-40 overflow-auto rounded-md border border-chat-rule bg-chat-bg p-2 text-[11.5px] shadow-lg"
+          className="absolute left-0 top-full z-10 mt-1 max-h-40 min-w-40 overflow-auto rounded-md border border-con-rule bg-con-bg p-2 text-[11.5px] shadow-lg"
         >
           {models.map((model) => (
-            <li key={model} className="px-1 py-0.5 text-chat-ink-2">
+            <li key={model} className="px-1 py-0.5 text-con-dim">
               {model}
             </li>
           ))}

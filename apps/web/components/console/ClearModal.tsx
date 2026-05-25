@@ -1,13 +1,11 @@
 // ClearModal — type-CLEAR-to-confirm destructive reset of the user's console
 // data.
 //
-// LLD frontend-web Phase 6 (Tasks 78-87). On mount it fetches the preview
-// breakdown (total + per-kind counts) and shows a skeleton until it resolves.
-// The destructive button is gated on the input strictly equalling 'CLEAR'.
-// While the POST is in flight an "Aborting active operations…" status shows;
-// on success it fires onCleared + onClose. Cancel always closes without
-// executing. A failed execute surfaces inline and stays retryable (onCleared
-// is never called on failure).
+// Reskinned to dev-tool dense design (REVIEW-BRIEF Finding 4). Uses console
+// CSS tokens (--con-bg, --con-panel, --con-rule, --con-text, etc.) for a
+// consistent dark-surface modal. All existing data-testids, aria-modal,
+// aria-labelledby, confirmation gating, in-flight status, and error handling
+// are fully preserved.
 
 'use client';
 
@@ -35,7 +33,6 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
 
   useEffect(() => {
     mountedRef.current = true;
-    // Move focus into the dialog on open (a11y: aria-modal must take focus).
     inputRef.current?.focus();
     void (async () => {
       try {
@@ -78,49 +75,107 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
       onKeyDown={(e) => {
         if (e.key === 'Escape') onClose();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 50,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.55)',
+        padding: 16,
+      }}
     >
-      <div className="w-full max-w-md rounded-lg border border-chat-rule bg-chat-bg p-5 shadow-xl">
-        <h2 id="console-clear-modal-title" className="text-sm font-semibold text-chat-ink">
+      <div
+        style={{
+          width: '100%',
+          maxWidth: 420,
+          background: 'var(--con-bg)',
+          border: '1px solid var(--con-rule)',
+          borderRadius: 8,
+          padding: 20,
+          boxShadow: '0 24px 48px -12px rgba(0,0,0,0.6)',
+          fontFamily: 'var(--font-geist), ui-sans-serif, sans-serif',
+        }}
+      >
+        <h2
+          id="console-clear-modal-title"
+          style={{
+            margin: '0 0 4px',
+            fontSize: 13.5,
+            fontWeight: 600,
+            color: 'var(--con-text)',
+          }}
+        >
           Clear all console data?
         </h2>
-        <p className="mt-1 text-[13px] text-chat-ink-2">
-          This permanently deletes your inferences, traces, and sample data. This cannot be
-          undone.
+        <p
+          style={{
+            margin: '0 0 16px',
+            fontSize: 12.5,
+            color: 'var(--con-dim)',
+            lineHeight: 1.5,
+          }}
+        >
+          This permanently deletes your inferences, traces, and sample data. This cannot be undone.
         </p>
 
         {preview === null ? (
           <div
             data-testid="console-clear-modal-skeleton"
             aria-hidden="true"
-            className="mt-4 h-16 animate-pulse rounded-md bg-chat-panel"
+            style={{
+              marginBottom: 16,
+              height: 64,
+              borderRadius: 5,
+              background: 'var(--con-panel)',
+              animation: 'pulse 1.5s ease-in-out infinite',
+            }}
           />
         ) : (
           <dl
             data-testid="console-clear-modal-breakdown"
-            className="mt-4 grid grid-cols-2 gap-2 rounded-md bg-chat-panel p-3 text-[12.5px]"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '6px 16px',
+              margin: '0 0 16px',
+              padding: '10px 12px',
+              background: 'var(--con-panel)',
+              border: '1px solid var(--con-rule)',
+              borderRadius: 5,
+              fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+              fontSize: 12,
+            }}
           >
-            <div className="col-span-2 flex justify-between font-medium text-chat-ink">
+            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', fontWeight: 600, color: 'var(--con-text)' }}>
               <dt>Total</dt>
-              <dd data-testid="console-clear-modal-count-total">{preview.total}</dd>
+              <dd data-testid="console-clear-modal-count-total" style={{ margin: 0 }}>{preview.total}</dd>
             </div>
-            <div className="flex justify-between text-chat-ink-2">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--con-dim)' }}>
               <dt>Chat</dt>
-              <dd data-testid="console-clear-modal-count-chat">{preview.chat}</dd>
+              <dd data-testid="console-clear-modal-count-chat" style={{ margin: 0 }}>{preview.chat}</dd>
             </div>
-            <div className="flex justify-between text-chat-ink-2">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--con-dim)' }}>
               <dt>Replay</dt>
-              <dd data-testid="console-clear-modal-count-replay">{preview.replay}</dd>
+              <dd data-testid="console-clear-modal-count-replay" style={{ margin: 0 }}>{preview.replay}</dd>
             </div>
-            <div className="flex justify-between text-chat-ink-2">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--con-dim)' }}>
               <dt>Sample</dt>
-              <dd data-testid="console-clear-modal-count-sample">{preview.sample}</dd>
+              <dd data-testid="console-clear-modal-count-sample" style={{ margin: 0 }}>{preview.sample}</dd>
             </div>
           </dl>
         )}
 
-        <label htmlFor="console-clear-confirm-input" className="mt-4 block text-[12.5px] text-chat-ink-2">
-          Type <span className="font-mono font-semibold text-chat-ink">CLEAR</span> to confirm
+        <label
+          htmlFor="console-clear-confirm-input"
+          style={{ display: 'block', fontSize: 12, color: 'var(--con-dim)', marginBottom: 4 }}
+        >
+          Type{' '}
+          <span style={{ fontFamily: 'var(--font-geist-mono), ui-monospace, monospace', fontWeight: 600, color: 'var(--con-text)' }}>
+            CLEAR
+          </span>{' '}
+          to confirm
         </label>
         <input
           id="console-clear-confirm-input"
@@ -130,7 +185,21 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
           value={confirmText}
           disabled={clearing}
           onChange={(e) => setConfirmText(e.target.value)}
-          className="mt-1 w-full rounded-[6px] border border-chat-rule bg-chat-bg px-2.5 py-1.5 text-[13px] text-chat-ink outline-none focus:border-acc focus-visible:ring-2 focus-visible:ring-acc disabled:opacity-60"
+          style={{
+            display: 'block',
+            width: '100%',
+            boxSizing: 'border-box',
+            background: 'var(--con-bg)',
+            border: '1px solid var(--con-rule)',
+            borderRadius: 4,
+            padding: '6px 10px',
+            fontSize: 12.5,
+            fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+            color: 'var(--con-text)',
+            outline: 'none',
+            marginBottom: 4,
+            opacity: clearing ? 0.6 : undefined,
+          }}
         />
 
         {clearing && (
@@ -138,7 +207,7 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
             data-testid="console-clear-modal-status"
             role="status"
             aria-live="polite"
-            className="mt-3 text-[12.5px] text-chat-ink-2"
+            style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--con-dim)' }}
           >
             Aborting active operations…
           </p>
@@ -147,19 +216,20 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
           <p
             data-testid="console-clear-modal-error"
             role="alert"
-            className="mt-3 text-[12.5px] text-err"
+            style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--err)' }}
           >
             {errorMessage}
           </p>
         )}
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <button
             type="button"
             data-testid="console-clear-modal-cancel"
             aria-label="Cancel"
             onClick={onClose}
-            className="min-h-9 rounded-[6px] border border-chat-rule px-3 py-1.5 text-[12.5px] font-medium text-chat-ink hover:bg-chat-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+            className="filter-chip"
+            style={{ padding: '6px 14px' }}
           >
             Cancel
           </button>
@@ -169,7 +239,20 @@ export function ClearModal({ onClose, onCleared }: ClearModalProps) {
             aria-label="Clear all data"
             disabled={!confirmed || clearing}
             onClick={handleConfirm}
-            className="min-h-9 rounded-[6px] bg-err px-3 py-1.5 text-[12.5px] font-medium text-chat-bg hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-acc disabled:cursor-not-allowed disabled:opacity-40"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '6px 14px',
+              borderRadius: 4,
+              background: 'var(--err)',
+              color: 'oklch(0.98 0.005 0)',
+              fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+              fontSize: 11.5,
+              fontWeight: 600,
+              cursor: !confirmed || clearing ? 'not-allowed' : 'pointer',
+              opacity: !confirmed || clearing ? 0.4 : undefined,
+              border: 'none',
+            }}
           >
             {clearing ? 'Clearing…' : 'Clear all data'}
           </button>

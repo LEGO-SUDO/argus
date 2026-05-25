@@ -39,7 +39,7 @@ export function FailoverChain({ attempts, userMessagePreview }: FailoverChainPro
       {userMessagePreview && (
         <p
           data-testid="console-failover-chain-preview"
-          className="rounded-md bg-chat-panel px-2.5 py-1.5 text-chat-ink-2"
+          className="rounded-md bg-con-panel px-2.5 py-1.5 text-con-dim"
         >
           {userMessagePreview}
         </p>
@@ -49,12 +49,12 @@ export function FailoverChain({ attempts, userMessagePreview }: FailoverChainPro
           <li
             key={`${attempt.provider}-${attempt.model}-${index}`}
             data-testid={`console-failover-attempt-${index}`}
-            className="flex items-center justify-between rounded-md border border-chat-rule px-2.5 py-1.5"
+            className="flex items-center justify-between rounded-md border border-con-rule px-2.5 py-1.5"
           >
-            <span className="text-chat-ink">
+            <span className="text-con-text">
               {attempt.provider} · {attempt.model}
             </span>
-            <span className="text-chat-ink-2" data-status={attempt.status}>
+            <span className="text-con-dim" data-status={attempt.status}>
               {attempt.status}
               {attempt.errorCode ? ` (${attempt.errorCode})` : ''}
             </span>

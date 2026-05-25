@@ -13,13 +13,21 @@ import { createInMemoryPrisma, InMemoryPrisma } from '../fixtures/prisma-test-cl
 import { seedInference } from '../console/seed-inference';
 import type { ChatStreamChunk } from '@argus/sdk';
 
-function completingSdk(captured?: { messages?: unknown }): SdkChat {
+function completingSdk(captured?: { messages?: unknown; pin?: unknown }): SdkChat {
   return {
     stream(req) {
-      if (captured) captured.messages = req.messages;
+      if (captured) {
+        captured.messages = req.messages;
+        captured.pin = req.pin;
+      }
+      // The router commits the pinned provider/model (R1) — mirror that here so
+      // the stub's `done` chunk carries the chosen pair, not a generic default.
       return (async function* (): AsyncIterable<ChatStreamChunk> {
         yield { type: 'token', content: 'replayed' };
-        yield { type: 'done', providerMeta: { provider: req.provider ?? 'mock', model: req.model ?? 'mock-1' } };
+        yield {
+          type: 'done',
+          providerMeta: { provider: req.pin?.provider ?? 'mock', model: req.pin?.model ?? 'mock-1' },
+        };
       })();
     },
   };
@@ -90,6 +98,18 @@ describe('ReplayService.run', () => {
     expect(msgs.some((m) => m.role === 'user' && m.content === 'original question')).toBe(true);
   });
 
+  // REVIEW-BRIEF Finding 5 (R1): the chosen target provider/model must reach
+  // the router as a `pin` — passing them as ignored hint fields silently
+  // re-ran every replay against the default router head.
+  it('threads the chosen provider/model to the router as a pin', async () => {
+    const captured: { pin?: unknown } = {};
+    const b = build(completingSdk(captured));
+    const sourceId = seedSourceTurn(b);
+    await b.service.run({ userId: b.userId, sourceInferenceId: sourceId, provider: 'anthropic', model: 'claude-haiku-4-5' });
+    await flush();
+    expect(captured.pin).toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' });
+  });
+
   it('persists a kind=replay row with the self-FK and returns the new ids', async () => {
     const b = build();
     const sourceId = seedSourceTurn(b);
@@ -122,7 +142,10 @@ describe('ReplayService.run', () => {
         return (async function* (): AsyncIterable<ChatStreamChunk> {
           yield { type: 'token', content: 'x' };
           await gate;
-          yield { type: 'done', providerMeta: { provider: req.provider ?? 'mock', model: req.model ?? 'mock-1' } };
+          yield {
+            type: 'done',
+            providerMeta: { provider: req.pin?.provider ?? 'mock', model: req.pin?.model ?? 'mock-1' },
+          };
         })();
       },
     };

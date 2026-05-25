@@ -1,4 +1,9 @@
 // Tests for <TracesFilterBar /> (LLD Tasks 102-105).
+//
+// Reskin delta: the filter bar is now a fragment of .filter-chip triggers and
+// inline elements inside .con-tools. Each multi-select trigger opens a dropdown;
+// tests open the trigger first before selecting an option. All behavioral
+// coverage (AND-combined emit, clear-all) is unchanged.
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TracesFilterBar } from '@/components/console/traces/TracesFilterBar';
@@ -14,6 +19,8 @@ describe('<TracesFilterBar /> AND-combined emit (Task 102)', () => {
     const onChange = jest.fn();
     const value: TracesFilter = { ...emptyTracesFilter(), status: ['failed'] };
     render(<TracesFilterBar value={value} onChange={onChange} {...baseProps} />);
+    // Open the provider dropdown first, then click the openai chip
+    await userEvent.click(screen.getByTestId('console-filter-provider-trigger'));
     await userEvent.click(screen.getByTestId('console-filter-provider-openai'));
     expect(onChange).toHaveBeenCalledWith({
       ...emptyTracesFilter(),

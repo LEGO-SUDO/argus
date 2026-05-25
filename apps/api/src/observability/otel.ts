@@ -11,7 +11,7 @@
 // This lets unit tests + keyless dev runs avoid network noise without
 // touching the SDK code.
 
-import { NodeSDK } from '@opentelemetry/sdk-node';
+import { NodeSDK, tracing } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
@@ -31,13 +31,19 @@ export function initOtel(): void {
   const exporter = new OTLPTraceExporter({
     url: `${endpoint.replace(/\/$/, '')}/v1/traces`,
   });
+  // Explicit BatchSpanProcessor with a 500ms flush (REVIEW-BRIEF Finding 2).
+  // NodeSDK's default `traceExporter` wiring builds a BatchSpanProcessor with
+  // the SDK default `scheduledDelayMillis: 5000` — a span emitted just after a
+  // flush would wait ~5s before it even leaves the API, which is the dominant
+  // term in the PRD's "~5s end-to-end" budget and can blow it. 500ms keeps the
+  // batch small without busy-flushing on every span.
   sdkInstance = new NodeSDK({
     serviceName: process.env.OTEL_SERVICE_NAME ?? 'argus-api',
     resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? 'argus-api',
       [ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION ?? '0.0.0',
     }),
-    traceExporter: exporter,
+    spanProcessors: [new tracing.BatchSpanProcessor(exporter, { scheduledDelayMillis: 500 })],
   });
   sdkInstance.start();
 

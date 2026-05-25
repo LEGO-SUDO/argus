@@ -3,6 +3,10 @@
 // Renders one selectable entry per candidate (filtered by the Traces window
 // passed in as a prop) with an accessible status label; a canceled candidate
 // additionally shows a "partial input only" warning. Pure render + onSelect.
+//
+// Reskinned to the dev-tool design language (REVIEW-BRIEF Finding 4).
+// Used both as a standalone list (no-source state) and inside the SourceMenu
+// dropdown in ReplayPickerBar. All data-testids and ARIA attributes preserved.
 
 'use client';
 
@@ -19,6 +23,14 @@ function withinWindow(startedAt: string, window: TimeWindow, now: number): boole
   return Date.parse(startedAt) >= cutoff;
 }
 
+const STATUS_PILL: Record<string, string> = {
+  ok: 'pill ok',
+  failed: 'pill err',
+  timed_out: 'pill warn',
+  canceled: 'pill cancel',
+  streaming: 'pill streaming',
+};
+
 export type ReplayPickerProps = {
   candidates: ReplayCandidate[];
   window: TimeWindow;
@@ -31,7 +43,7 @@ export function ReplayPicker({ candidates, window, onSelect, now = Date.now() }:
   const visible = candidates.filter((c) => withinWindow(c.startedAt, window, now));
 
   return (
-    <ul data-testid="console-replay-picker" role="list" className="flex flex-col gap-1">
+    <ul data-testid="console-replay-picker" role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
       {visible.map((candidate) => (
         <li key={candidate.id}>
           <button
@@ -39,31 +51,68 @@ export function ReplayPicker({ candidates, window, onSelect, now = Date.now() }:
             data-testid={`console-replay-candidate-${candidate.id}`}
             aria-label={`Replay candidate ${candidate.model}, status ${candidate.status}`}
             onClick={() => onSelect(candidate)}
-            className="flex w-full flex-col gap-0.5 rounded-md border border-chat-rule px-3 py-2 text-left hover:bg-chat-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+            role="option"
+            aria-selected={false}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '70px 110px 1fr',
+              gap: 10,
+              alignItems: 'center',
+              width: '100%',
+              padding: '7px 9px',
+              borderRadius: 4,
+              textAlign: 'left',
+              color: 'var(--con-text)',
+              fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+              fontSize: 11.5,
+              background: 'transparent',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'var(--con-hover)';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+            }}
           >
-            <span className="flex items-center gap-2 text-[12.5px] text-chat-ink">
-              <span className="font-medium">
-                {candidate.provider} · {candidate.model}
-              </span>
-              <span
-                data-testid={`console-replay-candidate-${candidate.id}-status`}
-                data-status={candidate.status}
-                className="text-chat-ink-2"
-              >
-                {candidate.status}
-              </span>
+            {/* Status pill */}
+            <span
+              data-testid={`console-replay-candidate-${candidate.id}-status`}
+              data-status={candidate.status}
+              className={STATUS_PILL[candidate.status] ?? 'pill'}
+              aria-label={`Status: ${candidate.status}`}
+            >
+              <span className="pdot" aria-hidden="true" />
+              {candidate.status}
             </span>
-            <span className="truncate text-[11.5px] text-chat-ink-3">
-              {candidate.conversationTitle ?? 'Untitled conversation'}
+
+            {/* Provider tag */}
+            <span className="ptag" data-prov={candidate.provider}>
+              <span className="swatch" aria-hidden="true" />
+              {candidate.provider}
             </span>
-            {candidate.status === 'canceled' && (
+
+            {/* Input preview + conversation title */}
+            <span style={{ minWidth: 0 }}>
               <span
-                data-testid={`console-replay-candidate-${candidate.id}-warning`}
-                className="text-[11px] text-warn"
+                style={{
+                  display: 'block',
+                  color: 'var(--con-dim)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
               >
-                Partial input only — original was canceled before completing.
+                {candidate.inputPreview ?? candidate.conversationTitle ?? 'Untitled conversation'}
               </span>
-            )}
+              {candidate.status === 'canceled' && (
+                <span
+                  data-testid={`console-replay-candidate-${candidate.id}-warning`}
+                  style={{ color: 'var(--warn)', fontSize: 10.5, marginTop: 2, display: 'block' }}
+                >
+                  Partial input only — original was canceled before completing.
+                </span>
+              )}
+            </span>
           </button>
         </li>
       ))}

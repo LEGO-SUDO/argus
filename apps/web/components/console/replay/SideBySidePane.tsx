@@ -30,34 +30,34 @@ export function SideBySidePane({ original, replay, diff, mode }: SideBySidePaneP
   }, [expandedPane]);
 
   return (
-    <div data-testid="console-replay-side-by-side" className="rounded-md border border-chat-rule">
+    <div data-testid="console-replay-side-by-side" className="rounded-md border border-con-rule">
       {mode === 'diff' ? (
         <div data-testid="console-replay-diff-view" className="p-3">
           <DiffRenderer changes={diff} />
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-px bg-chat-rule md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-px bg-con-rule md:grid-cols-2">
           <section
             data-testid="console-replay-pane-original"
-            className="flex flex-col gap-1 bg-chat-bg p-3"
+            className="flex flex-col gap-1 bg-con-bg p-3"
           >
-            <header className="flex items-center justify-between text-[11px] uppercase tracking-wide text-chat-ink-3">
+            <header className="flex items-center justify-between text-[11px] uppercase tracking-wide text-con-dim-2">
               Original
               <PaneExpandControl label="original" onExpand={() => setExpandedPane('original')} />
             </header>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] text-chat-ink">
+            <div className="whitespace-pre-wrap break-words text-[12.5px] text-con-text">
               {original}
             </div>
           </section>
           <section
             data-testid="console-replay-pane-replay"
-            className="flex flex-col gap-1 bg-chat-bg p-3"
+            className="flex flex-col gap-1 bg-con-bg p-3"
           >
-            <header className="flex items-center justify-between text-[11px] uppercase tracking-wide text-chat-ink-3">
+            <header className="flex items-center justify-between text-[11px] uppercase tracking-wide text-con-dim-2">
               Replay
               <PaneExpandControl label="replay" onExpand={() => setExpandedPane('replay')} />
             </header>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] text-chat-ink">
+            <div className="whitespace-pre-wrap break-words text-[12.5px] text-con-text">
               {replay}
             </div>
           </section>
@@ -79,7 +79,7 @@ export function SideBySidePane({ original, replay, diff, mode }: SideBySidePaneP
           }}
         >
           <div
-            className="mx-auto max-w-3xl rounded-md bg-chat-bg p-5 text-[13px] text-chat-ink"
+            className="mx-auto max-w-3xl rounded-md bg-con-bg p-5 text-[13px] text-con-text"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex justify-end">
@@ -88,7 +88,7 @@ export function SideBySidePane({ original, replay, diff, mode }: SideBySidePaneP
                 data-testid="console-replay-pane-expanded-close"
                 aria-label="Close expanded pane"
                 onClick={() => setExpandedPane(null)}
-                className="rounded-[6px] border border-chat-rule px-2.5 py-1 text-[12px] font-medium text-chat-ink-2 hover:bg-chat-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+                className="rounded-[6px] border border-con-rule px-2.5 py-1 text-[12px] font-medium text-con-dim hover:bg-con-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
               >
                 Close
               </button>
