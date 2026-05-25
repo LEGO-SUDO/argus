@@ -49,6 +49,13 @@ spec:
         app: redpanda
     spec:
       terminationGracePeriodSeconds: 30
+      # DO block-storage PVCs mount root-owned, but the redpanda image runs as
+      # uid/gid 101 and can't write /var/lib/redpanda/data without this.
+      # fsGroup makes the kubelet chown the volume to gid 101 on mount.
+      securityContext:
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
       containers:
         - name: redpanda
           image: redpandadata/redpanda:v24.2.13

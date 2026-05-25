@@ -81,6 +81,18 @@ cd -
 # ingress-nginx (provisions the DO LoadBalancer)
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/do/deploy.yaml
 
+# DOKS gotcha: DO "REGIONAL_NETWORK" LB + ingress-nginx default PROXY-protocol
+# mismatch → "empty reply from server" on :80/:443. Disable it on both sides
+# (we don't need client-IP preservation):
+kubectl patch configmap ingress-nginx-controller -n ingress-nginx --type merge \
+  -p '{"data":{"use-proxy-protocol":"false"}}'
+kubectl annotate svc ingress-nginx-controller -n ingress-nginx \
+  service.beta.kubernetes.io/do-loadbalancer-enable-proxy-protocol="false" --overwrite
+kubectl rollout restart deploy/ingress-nginx-controller -n ingress-nginx
+# Do NOT set service.beta.../do-loadbalancer-hostname on a REGIONAL_NETWORK LB —
+# it breaks the data path. cert-manager HTTP-01 works without any hairpin
+# workaround on single-node DOKS.
+
 # cert-manager
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.1/cert-manager.yaml
 kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
@@ -206,6 +218,9 @@ kubectl port-forward -n argus svc/jaeger 16686:16686 # Jaeger UI at :16686
 | Pods `Pending` / `Evicted` | Node too small — scale the pool: `doctl kubernetes cluster node-pool update argus-prod pool --size s-4vcpu-8gb` (or `--count 2`). |
 | `api`/`workers` CrashLoopBackOff at start | Redpanda not ready yet, or migration not done. Check `kubectl get job db-migrate -n argus` and Redpanda readiness. Self-heals once both are up. |
 | Certificate stuck `READY=False` | DNS not resolving to the LB, or port 80 blocked. `kubectl describe certificate api-argus-tls -n argus` and confirm `dig api-argus.duckdns.org` returns the LB IP. |
+| `empty reply from server` on :80/:443 | DO LB ↔ ingress-nginx PROXY-protocol mismatch. Disable on both sides (step 3). |
+| Redpanda `CrashLoopBackOff`, log shows `pid.lock ... Permission denied` | DO block-storage PVC mounts root-owned; the StatefulSet's `securityContext.fsGroup: 101` fixes it — re-apply if removed. |
+| cert `pending`, self-check `context deadline exceeded` | Almost always the LB data path is down — `curl` the LB IP on :80. On single-node DOKS this is **not** hairpin; don't add the hostname annotation. |
 | WebSocket drops after ~60s | Ingress timeout annotations missing (`proxy-read/send-timeout: 3600` are set in `api.yaml` — re-apply if you edited the Ingress). |
 | SSE feed buffers / no live updates | `nginx.ingress.kubernetes.io/proxy-buffering: "off"` must be on the api Ingress. |
 | Prisma migrate fails on Neon | Ensure `?sslmode=require` and you're using the **direct** (not pooled) Neon host. |
