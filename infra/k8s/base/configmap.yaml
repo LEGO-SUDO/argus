@@ -1,0 +1,38 @@
+# Non-secret runtime config shared by api + workers.
+#
+# In-cluster service DNS (namespace `argus`):
+#   redpanda-0.redpanda.argus.svc.cluster.local:9092  (headless StatefulSet pod)
+#   otel-collector.argus.svc.cluster.local:4318        (OTLP HTTP)
+#   jaeger.argus.svc.cluster.local:16686               (query API for Console)
+#
+# Secrets (DATABASE_URL, SESSION_SECRET, provider keys, SENTRY_DSN) live in the
+# `argus-secrets` Secret — see secret.example.yaml. Never put them here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argus-config
+  namespace: argus
+data:
+  NODE_ENV: "production"
+  # Start TRUE so the first end-to-end deploy works with zero provider keys
+  # (deterministic mock responses). Flip to "false" and populate the provider
+  # keys in argus-secrets once the cluster is verified healthy.
+  MOCK_PROVIDER: "true"
+  CONTEXT_MAX_TOKENS: "6000"
+
+  # Telemetry: api + workers export OTLP to the collector; api queries Jaeger.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  JAEGER_QUERY_URL: "http://jaeger:16686"
+
+  # Redpanda (Kafka API). Clients bootstrap to the stable headless pod DNS,
+  # which is also what the broker advertises — single source of truth.
+  REDPANDA_BROKERS: "redpanda-0.redpanda.argus.svc.cluster.local:9092"
+  REDPANDA_TRACES_TOPIC: "traces"
+  LIVE_EVENTS_TOPIC: "live-events"
+  LIVE_EVENTS_CONSUMER_GROUP: "api-live-fanout"
+
+  # Provider model overrides (optional; blank = SDK defaults).
+  OPENAI_MODEL: ""
+  ANTHROPIC_MODEL: ""
+  GOOGLE_MODEL: ""
+  PROVIDER_ORDER: ""

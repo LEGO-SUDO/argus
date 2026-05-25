@@ -1,0 +1,39 @@
+# ============================================================================
+# Prisma migrate deploy — runs once against Neon before api/workers roll.
+#
+# Uses the api image (it ships prisma + the schema). Overrides the image CMD
+# (which would also start the Nest app) to run ONLY `migrate deploy`, which is
+# idempotent and acquires a Postgres advisory lock — safe to re-apply.
+#
+# Apply + wait for this BEFORE applying api/workers (the api Deployment's
+# command is overridden to skip the inline migrate, so the Job owns schema).
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: argus
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: argus-api # kustomize rewrites to the DOCR path + tag
+          command: ["/sbin/tini", "--", "sh", "-c"]
+          args:
+            - packages/db/node_modules/.bin/prisma migrate deploy --schema packages/db/prisma/schema.prisma
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: argus-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

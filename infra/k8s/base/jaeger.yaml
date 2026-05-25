@@ -1,0 +1,68 @@
+# ============================================================================
+# Jaeger all-in-one — trace UI + query API the Console's Traces tab reads via
+# JAEGER_QUERY_URL (http://jaeger:16686).
+#
+# In-memory storage (ephemeral): cheapest, zero PVC. Traces are lost on
+# restart and capped at MEMORY_MAX_TRACES. For persistence, switch
+# SPAN_STORAGE_TYPE=badger + a small PVC (see README).
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.62.0
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: "memory"
+            # Bound in-memory growth so Jaeger can't OOM the node.
+            - name: MEMORY_MAX_TRACES
+              value: "20000"
+          ports:
+            - { containerPort: 16686, name: query }
+            - { containerPort: 4317, name: otlp-grpc }
+            - { containerPort: 4318, name: otlp-http }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: argus
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - { name: query, port: 16686, targetPort: 16686 }
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }

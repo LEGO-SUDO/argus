@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# argus-secrets is created out-of-band (real values, never committed) — see
+# secret.example.yaml. The ClusterIssuer lives under ../cert-manager and is
+# applied once at cluster setup, not per-deploy.
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - redpanda.yaml
+  - otel-collector.yaml
+  - jaeger.yaml
+  - migrate-job.yaml
+  - api.yaml
+  - workers.yaml

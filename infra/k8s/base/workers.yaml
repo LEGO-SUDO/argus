@@ -1,0 +1,56 @@
+# ============================================================================
+# Workers — NestJS Redpanda projection consumer (traces topic) + live-events
+# publisher. No public ingress; only an internal /healthz for probes.
+#
+# Single replica: the consumer group + per-trace partition key keep ordering.
+# Scaling >1 is safe (Kafka rebalances partitions) but unnecessary at this size.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workers
+  namespace: argus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # consumer group: avoid two generations double-reading on rollout
+  selector:
+    matchLabels:
+      app: workers
+  template:
+    metadata:
+      labels:
+        app: workers
+    spec:
+      containers:
+        - name: workers
+          image: argus-workers # kustomize rewrites to the DOCR path + tag
+          ports:
+            - { containerPort: 3002, name: http }
+          envFrom:
+            - configMapRef:
+                name: argus-config
+            - secretRef:
+                name: argus-secrets
+          env:
+            - name: PORT
+              value: "3002"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              memory: 384Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            initialDelaySeconds: 30
+            periodSeconds: 15

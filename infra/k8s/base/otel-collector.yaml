@@ -1,0 +1,105 @@
+# ============================================================================
+# OTel Collector — receives OTLP from api + workers, fans out to Redpanda
+# (`traces` topic, read by the projection consumer) and Jaeger (trace UI).
+#
+# Config mirrors infra/otel/collector.yaml, repointed to in-cluster DNS.
+# Distroless image → no shell, so no exec probe (nothing gates on its health;
+# the health_check extension still serves :13133 for manual probes).
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: argus
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      batch:
+        timeout: 200ms
+        send_batch_size: 512
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    exporters:
+      kafka:
+        brokers:
+          - redpanda-0.redpanda.argus.svc.cluster.local:9092
+        topic: traces
+        encoding: otlp_json
+        partition_traces_by_id: true
+        producer:
+          compression: gzip
+          max_message_bytes: 1048576
+          required_acks: 1
+      otlp/jaeger:
+        endpoint: jaeger.argus.svc.cluster.local:4317
+        tls:
+          insecure: true
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [kafka, otlp/jaeger]
+      telemetry:
+        logs:
+          level: info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.110.0
+          args: ["--config=/etc/otel/collector.yaml"]
+          ports:
+            - { containerPort: 4317, name: otlp-grpc }
+            - { containerPort: 4318, name: otlp-http }
+            - { containerPort: 13133, name: health }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: argus
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }
+    - { name: health, port: 13133, targetPort: 13133 }
