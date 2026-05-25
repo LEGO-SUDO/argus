@@ -85,7 +85,10 @@ export async function bootIntegrationEnv(): Promise<IntegrationEnv> {
 
   // Apply every committed migration in order. We use the raw migration SQL
   // the project commits so the test exercises the same DDL Prisma will
-  // deploy in prod.
+  // deploy in prod. (PR #7's canonical approach — split multi-statement
+  // migration.sql on `;` and run each statement separately, since Postgres'
+  // extended-query protocol rejects multiple commands per call. Phase B's
+  // migration 0003 directories are picked up here in lexicographic order.)
   const adminPrisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   for (const file of listMigrationFiles()) {
     const sql = readFileSync(file, 'utf8');

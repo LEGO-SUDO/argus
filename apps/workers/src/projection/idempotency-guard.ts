@@ -6,7 +6,7 @@
 // We DON'T pre-check with a SELECT — that is a TOCTOU race under duplicate
 // Collector delivery. Let the unique index be the source of truth.
 import { Prisma } from '@argus/db';
-import type { TraceEventInsert } from '@argus/contracts';
+import type { InferenceKind, TraceEventInsert } from '@argus/contracts';
 
 // Narrow shape we need from a Prisma TX so callers can hand us either the
 // full client or a $transaction tx.
@@ -21,6 +21,9 @@ export interface TraceEventTx {
         name: string;
         payload: Prisma.InputJsonValue;
         truncated: boolean;
+        // Phase B: denormalized kind, populated from the span's llm.kind so ops
+        // can group trace events per-kind without joining inferences.
+        kind?: InferenceKind | null;
       };
     }): Promise<unknown>;
   };
@@ -33,6 +36,7 @@ export type InsertVerdict =
 export async function tryInsertTraceEvent(
   tx: TraceEventTx,
   insert: TraceEventInsert,
+  kind?: InferenceKind | null,
 ): Promise<InsertVerdict> {
   try {
     await tx.traceEvent.create({
@@ -44,6 +48,7 @@ export async function tryInsertTraceEvent(
         name: insert.name,
         payload: (insert.payload ?? null) as Prisma.InputJsonValue,
         truncated: insert.truncated,
+        kind: kind ?? null,
       },
     });
     return { proceeded: true };

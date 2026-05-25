@@ -36,6 +36,23 @@ export const WS_PATH = '/ws/chat';
 // Inbound (client → server)
 // ---------------------------------------------------------------------------
 
+// Phase B: the provider the user selected in the four-option `/console` /
+// chat selector. `auto` routes via the Auto classifier/heuristic; the rest
+// pin a specific provider. Optional + defaulted at the gateway (absent → mock)
+// so Phase A clients that omit it keep working. Distinct from the
+// `pinnedProvider`/`pinnedModel` pair below: this is a provider-only
+// quick-select (the gateway derives a representative model and applies it as
+// the LOWEST-precedence pin), whereas the pin pair is the model picker's
+// precise provider+model choice and always wins.
+export const ChatProviderSelectionSchema = z.enum([
+  'auto',
+  'openai',
+  'anthropic',
+  'gemini',
+  'mock',
+]);
+export type ChatProviderSelection = z.infer<typeof ChatProviderSelectionSchema>;
+
 // chat-context-and-ux-polish (integration review — first-turn pin race).
 // Optional pin fields on the send frame so the FIRST turn of a brand-new
 // conversation can honor the picker selection. Without this, the frontend
@@ -94,6 +111,10 @@ const WsSendFrameObjectSchema = z.object({
   // through the existing persisted-pin path.
   pinnedProvider: SendPinFieldSchema,
   pinnedModel: SendPinFieldSchema,
+  // Phase B provider selection (optional for Phase A back-compat). The
+  // four-option quick-select; the gateway resolves it into a lowest-precedence
+  // pin so it never overrides an explicit `pinnedProvider`/`pinnedModel` pair.
+  provider: ChatProviderSelectionSchema.optional(),
 });
 
 // Standalone send-frame schema — carries the coupling constraint.

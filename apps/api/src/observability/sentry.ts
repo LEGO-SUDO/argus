@@ -70,7 +70,18 @@ function redactSecrets(s: string): string {
 
 export interface CaptureApiErrorInput {
   err: unknown;
-  feature: 'auth' | 'conversations' | 'chat' | 'bootstrap';
+  feature:
+    | 'auth'
+    | 'conversations'
+    | 'chat'
+    | 'bootstrap'
+    // Phase B (control plane) features.
+    | 'auto'
+    | 'console'
+    | 'replay'
+    | 'live'
+    | 'janitor'
+    | 'heartbeat';
   layer: 'controller' | 'service' | 'repository' | 'gateway' | 'orchestrator';
   statusClass?: '4xx' | '5xx';
   extra?: Record<string, unknown>;

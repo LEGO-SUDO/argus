@@ -41,13 +41,35 @@ import { ContextMeterService } from './context-meter.service';
 import { resolveWsUser } from '../auth/ws-session';
 import { AuthService } from '../auth/auth.service';
 import { ConversationsRepository } from '../conversations/conversations.repository';
-import { WS_PATH, WsFrameInboundSchema, type WsFrameOutbound } from '@argus/contracts';
+import {
+  WS_PATH,
+  WsFrameInboundSchema,
+  type WsFrameOutbound,
+  type ChatProviderSelection,
+} from '@argus/contracts';
 import type { ChatStreamRequest } from '@argus/sdk';
+import { AutoRouterService } from '../auto/auto-router.service';
+import { OrchestratorRegistry } from '../orchestrator/registry';
+import type { OrchestratorHandle } from '../orchestrator/handle';
 import { captureApiError, withWsScope } from '../observability/sentry';
 import { buildEndFrame, buildErrorFrame } from './frame-builder';
 import { SDK_CATALOG, type SdkCatalogAccessor } from '../common/sdk-catalog.provider';
 import { SDK_CHAT_STREAM, type SdkChatStreamFn } from '../common/sdk-chat.provider';
 import { defaultContextBudget } from '../common/token-heuristic';
+
+// Representative model label per provider for the `start` frame. The SDK
+// determines the real model from env config and reports it on the `done`
+// chunk's providerMeta; this is the optimistic label shown before first token.
+const DEFAULT_MODEL_FOR: Record<string, string> = {
+  openai: 'gpt-4o-mini',
+  anthropic: 'claude-haiku-4-5',
+  gemini: 'gemini-3-flash-preview',
+  mock: 'mock-1',
+};
+
+function defaultModelFor(provider: string): string {
+  return DEFAULT_MODEL_FOR[provider] ?? 'mock-1';
+}
 
 interface ChatClient extends WebSocket {
   data?: ChatClientData;
@@ -80,6 +102,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     private readonly auth: AuthService,
     private readonly conversations: ConversationsRepository,
     private readonly contextMeter: ContextMeterService,
+    // Phase B (control plane) — Auto routing + the global orchestrator
+    // registry so the console Clear flow can cancel in-flight chat runs.
+    private readonly autoRouter: AutoRouterService,
+    private readonly registry: OrchestratorRegistry,
     @Inject(SDK_CATALOG) private readonly catalog: SdkCatalogAccessor,
     @Inject(SDK_CHAT_STREAM) private readonly sdkStream: SdkChatStreamFn,
   ) {}
@@ -231,6 +257,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       // boundary (WsSendFrameSchema): both present or both omitted.
       pinnedProvider?: string;
       pinnedModel?: string;
+      // Phase B (control plane) — optional four-option provider selector.
+      // `auto` delegates to the Auto classifier/router; an explicit provider
+      // pins that adapter. Resolved into the SDK request's `pin` below (only
+      // when no explicit send-frame pin is present). Absent → mock (Phase A).
+      provider?: ChatProviderSelection;
     },
   ): Promise<void> {
     // Mint the assistant messageId BEFORE any work that can fail — the
@@ -308,7 +339,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     // chat-context-and-ux-polish LLD Task 53 — startTurn now returns the
     // multi-turn history (oldest-first, streaming rows excluded) AND the
     // conversation's pin pair, so the gateway can build the SDK request
-    // without a second round-trip.
+    // without a second round-trip. It also returns the user message id, which
+    // Phase B's Auto router needs to key its classifier inference row.
     let startResult;
     try {
       startResult = await this.chatService.startTurn({
@@ -337,6 +369,39 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       return;
     }
 
+    // Phase B (control plane) — resolve the four-option provider selector into
+    // an optional pin BEFORE opening the SDK stream. `auto` delegates to the
+    // Auto router (which may persist a classifier row); an explicit provider
+    // pins that adapter at its representative model. This `autoPin` is applied
+    // only as the LOWEST-precedence pin source below — an explicit send-frame
+    // pin or the conversation's persisted pin always wins, so the model picker
+    // (PR #5) and the four-option selector (Phase B) don't fight. Absent
+    // selection → no autoPin (Phase A behavior: SDK selects via env/router).
+    let autoPin: { provider: string; model: string } | undefined;
+    if (frame.provider === 'auto') {
+      try {
+        const decision = await this.autoRouter.route({
+          userId: data.userId,
+          conversationId,
+          userMessageId: startResult.userMessageId,
+          content: frame.content,
+        });
+        autoPin = { provider: decision.provider, model: defaultModelFor(decision.provider) };
+      } catch (err) {
+        // Router never throws (it self-heals to the heuristic), but guard
+        // anyway so a routing bug degrades to mock rather than dropping the turn.
+        captureApiError({
+          err,
+          feature: 'auto',
+          layer: 'gateway',
+          extra: { stage: 'route', conversationId, messageId: assistantMessageId },
+        });
+        autoPin = { provider: 'mock', model: defaultModelFor('mock') };
+      }
+    } else if (frame.provider) {
+      autoPin = { provider: frame.provider, model: defaultModelFor(frame.provider) };
+    }
+
     const abort = new AbortController();
     const turnIndex = await this.computeTurnIndex(conversationId);
     // chat-context-and-ux-polish LLD Tasks 61/63/65 — build the SDK
@@ -349,11 +414,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     // persisted inside the startTurn transaction above, so the persisted-pin
     // read would already reflect it — but we resolve `sendPin` first
     // explicitly so the precedence is obvious and independent of read timing.
+    // Phase B's `autoPin` (the four-option selector / Auto router decision) is
+    // the lowest-precedence fallback so it never overrides a real model pick.
     const pin =
       sendPin ??
       (startResult.pinnedProvider && startResult.pinnedModel
         ? { provider: startResult.pinnedProvider, model: startResult.pinnedModel }
-        : undefined);
+        : undefined) ??
+      autoPin;
     const configuredDefault = defaultContextBudget();
     const effectiveBudget = this.catalog.getEffectiveBudget(configuredDefault, pin);
     // Window cap is the pinned model's contextWindow (or absent when no pin
@@ -391,7 +459,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       conversationId,
       // LLD Task 57 — pass the meter + userId so the orchestrator can
       // populate the `end` frame's tokensUsed/tokensBudget on the complete
-      // terminal.
+      // terminal. (Provider/model were removed from RunStreamInput in PR #5
+      // LLD Task 41 — the orchestrator now reads them off the SDK `commit`
+      // chunk, so Phase B's provider/model hints flow through the SDK `pin`
+      // above rather than into the orchestrator.)
       userId: data.userId,
       meter: this.contextMeter,
       sdkStream,
@@ -400,9 +471,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     });
     data.orchestrators.set(assistantMessageId, orchestrator);
 
+    // Register in the global registry so the Clear flow's cancelAll(userId) can
+    // stop this run; the per-connection map (above) handles WS cancel/disconnect.
+    const handle: OrchestratorHandle = {
+      messageId: assistantMessageId,
+      kind: 'chat',
+      cancel: () => orchestrator.cancel(),
+    };
+    this.registry.register(data.userId, handle);
+
     // Fire-and-forget; the orchestrator handles its own errors.
     void orchestrator.runStream().finally(() => {
       data.orchestrators.delete(assistantMessageId);
+      this.registry.deregister(data.userId, assistantMessageId);
     });
   }
 
