@@ -20,7 +20,16 @@ const nextConfig = {
   // Production deployments typically front the api on the same origin so
   // the rewrite is a no-op there.
   async rewrites() {
-    // Rewrites run server-side (in the Next server inside the web container).
+    // Production: NO edge rewrite. /api/* is handled by the Node route handler
+    // (app/api/[...path]/route.ts), which proxies via fetch at runtime. An
+    // always-on edge rewrite here intercepts /api/* BEFORE the route handler
+    // and makes Vercel's edge resolve the API host at build time — which fails
+    // with DNS_HOSTNAME_RESOLVED_PRIVATE (sensitive INTERNAL_API_URL isn't
+    // available at build, so apiOrigin falls back to localhost → 127.0.0.1).
+    if (process.env.NODE_ENV === 'production') {
+      return [];
+    }
+    // Dev only: proxy /api/* to the local api over the container/host network.
     // Use INTERNAL_API_URL (compose: http://api:4000) so the proxy can reach
     // the api over the container network. Fall back to localhost for hybrid
     // and host-only dev modes where the api is on the host.
