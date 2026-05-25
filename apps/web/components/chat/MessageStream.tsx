@@ -67,7 +67,7 @@ import {
 } from '@/lib/ws-client';
 import { ChatHero } from './ChatHero';
 import { ContextMeter } from './ContextMeter';
-import { MessageComposer } from './MessageComposer';
+import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
 import { MessageContent } from './MessageContent';
 import { MessageList, MessageMeta } from './MessageList';
 import { OmittedIndicator } from './OmittedIndicator';
@@ -125,6 +125,9 @@ type MessageStreamProps = {
   pinnedModel?: string | null;
   /** Inline stale-pin fallback notice (first paint of a resumed convo). */
   pinFallbackNotice?: PinFallbackNotice;
+  /** Fired when a turn reaches any terminal (composer lock releases). The host
+   *  uses it to refresh log-derived data like provider availability. */
+  onTurnSettled?: () => void;
 };
 
 export function MessageStream({
@@ -138,6 +141,7 @@ export function MessageStream({
   pinnedProvider = null,
   pinnedModel = null,
   pinFallbackNotice,
+  onTurnSettled,
 }: MessageStreamProps) {
   const router = useRouter();
   // Lazy init — applies `initialMessages` + `omittedCount` on first render
@@ -152,13 +156,10 @@ export function MessageStream({
   // already open. Real WsClient flips this in the open handler below.
   const [wsReady, setWsReady] = useState<boolean>(Boolean(wsClient));
   const [wsError, setWsError] = useState<string | null>(null);
-  // Composer pre-fill seed — bumping `composerSeed` forces the composer
-  // to remount with the new initial value (via key). This is the chosen
-  // primitive for starter-card pre-fill; React form refs are messier.
-  const [composerSeed, setComposerSeed] = useState<{
-    key: number;
-    text: string;
-  }>({ key: 0, text: '' });
+  // Imperative handle on the composer so a starter-card click can submit
+  // THROUGH the composer (carrying its active pin) rather than bypassing it
+  // with a bare `onSend` — which always sent Auto (the starter-pin bug).
+  const composerRef = useRef<MessageComposerHandle | null>(null);
 
   // Track the conversation id over the lifetime of this mount — starts null
   // for a brand-new conversation, then mutates to the server-minted id on
@@ -185,6 +186,21 @@ export function MessageStream({
   useEffect(() => {
     onMintedRef.current = onConversationMinted;
   }, [onConversationMinted]);
+  const onTurnSettledRef = useRef(onTurnSettled);
+  useEffect(() => {
+    onTurnSettledRef.current = onTurnSettled;
+  }, [onTurnSettled]);
+
+  // Fire `onTurnSettled` on every composer-lock release (turn reached a
+  // terminal: complete / canceled / failed / local-send-failed). The host
+  // refetches log-derived data (e.g. provider availability) off this.
+  const prevComposerDisabledRef = useRef(state.composerDisabled);
+  useEffect(() => {
+    if (prevComposerDisabledRef.current && !state.composerDisabled) {
+      onTurnSettledRef.current?.();
+    }
+    prevComposerDisabledRef.current = state.composerDisabled;
+  }, [state.composerDisabled]);
 
   // -------------------------------------------------------------------------
   // WS client lifecycle.
@@ -390,6 +406,19 @@ export function MessageStream({
     [client, lastUserText],
   );
 
+  // Resume handler (canceled turns). True mid-stream resume isn't built, so we
+  // issue a fresh continuation turn — a normal `send` whose content asks the
+  // model to keep going. The canceled turn's partial content is already
+  // persisted + threaded back into context, so the model has what it stopped
+  // on. We omit the pin (existing conversation → pin lives on the row).
+  const handleResume = useCallback(
+    (_canceledMessageId: string) => {
+      if (!client) return;
+      handleSend(RESUME_PROMPT);
+    },
+    [client, handleSend],
+  );
+
   // Cancel handler.
   const handleCancel = useCallback(() => {
     if (!client) return;
@@ -402,21 +431,14 @@ export function MessageStream({
     }
   }, [client, state.streaming]);
 
-  // Starter-card pre-fill: pre-load the composer with the starter text and
-  // submit immediately. Matches the design source's flow where clicking a
-  // starter sends the message rather than just typing it into the box.
-  const handleStarterPick = useCallback(
-    (text: string) => {
-      // We could just call handleSend(text) and skip the seed entirely.
-      // But seeding the composer means the user sees the text in the box
-      // for a beat before it submits — that's the design's intent.
-      setComposerSeed((prev) => ({ key: prev.key + 1, text }));
-      // Submit synchronously — the composer remount will clear itself
-      // after `onSend` resolves (which it does in the next microtask).
-      handleSend(text);
-    },
-    [handleSend],
-  );
+  // Starter-card pick: submit the starter text THROUGH the composer so the
+  // user's currently-selected provider/model pin rides along. Going through
+  // the composer (vs calling `handleSend` here) is the whole fix for the
+  // starter-always-Auto bug — the pin lives in composer state, so a direct
+  // `handleSend(text)` could never see it.
+  const handleStarterPick = useCallback((text: string) => {
+    composerRef.current?.submitText(text);
+  }, []);
 
   const streaming = state.streaming;
   // Empty-state check: only show the ChatHero on the new-conversation
@@ -436,7 +458,11 @@ export function MessageStream({
     <section
       data-testid="message-stream"
       data-ws-ready={wsReady ? 'true' : 'false'}
-      className="flex h-full min-h-0 flex-col"
+      // `flex-1 min-h-0` (not `h-full`): as a flex child of ChatShell's main
+      // column, this grows to fill the available height and keeps the composer
+      // pinned to the bottom even if a sibling (e.g. a transient route-segment
+      // fallback) briefly mounts alongside it.
+      className="flex min-h-0 flex-1 flex-col"
     >
       <div
         className="flex-1 overflow-y-auto"
@@ -475,7 +501,12 @@ export function MessageStream({
               <TerminalErrorBanner code={state.terminalError.errorCode} />
             ) : null}
 
-            <MessageList messages={state.messages} onRetry={handleRetry} />
+            <MessageList
+              messages={state.messages}
+              onRetry={handleRetry}
+              onResume={handleResume}
+              conversationId={conversationId}
+            />
 
             {streaming ? (
               <div
@@ -527,7 +558,7 @@ export function MessageStream({
       </div>
 
       <MessageComposer
-        key={composerSeed.key}
+        ref={composerRef}
         disabled={state.composerDisabled}
         streaming={streaming !== null}
         onSend={handleSend}
@@ -549,6 +580,11 @@ export function MessageStream({
     </section>
   );
 }
+
+// Continuation prompt sent when the user clicks Resume on a canceled turn.
+// Phrased as a plain instruction so it reads naturally in the transcript and
+// gives the model a clear directive to continue from the persisted partial.
+const RESUME_PROMPT = 'Please continue from where you left off.';
 
 // External README anchor for the "no providers configured" remediation
 // step. TODO(repo-owner): swap the placeholder for the real GitHub URL

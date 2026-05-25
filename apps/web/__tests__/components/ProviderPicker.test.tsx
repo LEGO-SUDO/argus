@@ -121,6 +121,61 @@ describe('ProviderPicker — dropdown listing', () => {
   });
 });
 
+describe('ProviderPicker — unavailable entries', () => {
+  const CATALOG_WITH_UNAVAILABLE: ProviderCatalog = {
+    providers: [
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0.15,
+        completionPerMillion: 0.6,
+        contextWindow: 128000,
+        available: true,
+      },
+      {
+        provider: 'gemini',
+        model: 'gemini-3-flash-preview',
+        promptPerMillion: 0,
+        completionPerMillion: 0,
+        contextWindow: 1000000,
+        available: false,
+      },
+    ],
+  };
+
+  it('renders an unavailable model as a disabled option with an "unavailable" pill', async () => {
+    renderPicker({ catalog: CATALOG_WITH_UNAVAILABLE });
+    await userEvent.click(screen.getByRole('combobox'));
+    // Rendered (so AT can announce it) but disabled + not roving-focusable.
+    const row = screen.getByTestId(
+      'provider-picker-option-gemini-gemini-3-flash-preview',
+    );
+    expect(row).toHaveAttribute('data-unavailable', 'true');
+    expect(row).toHaveAttribute('aria-disabled', 'true');
+    expect(row).toHaveAttribute('tabindex', '-1');
+    expect(
+      screen.getByTestId(
+        'provider-picker-unavailable-pill-gemini-gemini-3-flash-preview',
+      ),
+    ).toHaveTextContent(/unavailable/i);
+  });
+
+  it('does not pin when an unavailable row is clicked', async () => {
+    const onPin = jest.fn();
+    renderPicker({ catalog: CATALOG_WITH_UNAVAILABLE, onPin });
+    await userEvent.click(screen.getByRole('combobox'));
+    await userEvent.click(
+      screen.getByTestId(
+        'provider-picker-option-gemini-gemini-3-flash-preview',
+      ),
+    );
+    expect(onPin).not.toHaveBeenCalled();
+    // Available options remain selectable.
+    await userEvent.click(screen.getByRole('option', { name: /gpt-4o-mini/i }));
+    expect(onPin).toHaveBeenCalledWith('openai', 'gpt-4o-mini');
+  });
+});
+
 describe('ProviderPicker — selection', () => {
   // Task 109-110
   it('invokes onPin with the chosen provider+model and closes', async () => {
