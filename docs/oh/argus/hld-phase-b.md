@@ -16,7 +16,7 @@ Phase B turns Phase A's captured inference stream into the reviewer-facing conso
 
 ### D1: Live cost rollup via SUM on `inferences`, no rollup table
 **Choice:** Cost tab issues a live SUM of micro-USD costs against `inferences` per request, grouped by conversation/provider/model with the active time window. No materialized rollup.
-**Rationale:** Phase A already stores costs as integer micro-USD with a `(user_id, created_at)` index; at small-scale volumes a per-user SUM is sub-50ms. A rollup adds a second source of truth and a staleness window that conflicts with the live promise.
+**Rationale:** Phase A already stores costs as integer micro-USD with a `(user_id, created_at)` index; at expected volumes a per-user SUM is sub-50ms. A rollup adds a second source of truth and a staleness window that conflicts with the live promise.
 **Alternatives:** Materialized view refreshed by cron (staleness); consumer-written rollup table (doubles the write path). README flags a rollup as "would do next" at scale.
 **One-way door?** No.
 

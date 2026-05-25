@@ -119,7 +119,7 @@
 
 2. D2 Auto classifier: for Phase B demo, keyword routing first with optional model classifier behind a feature flag is simpler. It still proves Auto behavior without adding classifier cost, failure, and linkage complexity.
 
-3. D3 SSE: simpler than `LISTEN/NOTIFY` is SSE with short server-side polling on `MAX(updated_at)` per user. At small-scale scale, this avoids DB subscription lifecycle bugs.
+3. D3 SSE: simpler than `LISTEN/NOTIFY` is SSE with short server-side polling on `MAX(updated_at)` per user. At small scale, this avoids DB subscription lifecycle bugs.
 
 4. D4 Replay diff: compute diff client-side for the selected replay only. Simpler backend, acceptable payload if outputs are already capped.
 

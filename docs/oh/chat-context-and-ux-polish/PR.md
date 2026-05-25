@@ -198,7 +198,7 @@ the router is a fully separate code path — not a flag inside the failover loop
 - **540 unit/integration tests green:** contracts 39, sdk 95, api 164, web 242
 - **5 typecheck targets pass** (`contracts`, `sdk`, `api`, `web`, `e2e`)
 - **`next build` clean** — no SDK bundle leak into the client bundle
-- **Forbidden-ref grep clean** — no test/interview/small-scale refs in
+- **Forbidden-ref grep clean** — no stray internal references in
   production paths
 - **Playwright E2E specs** committed for all five features (provider-picker,
   focus, multi-turn-mock, multi-turn-real [env-gated], markdown-rendering

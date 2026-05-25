@@ -6,7 +6,7 @@
 2. `"add key in .env, or replay against Mock"` — file path/config detail. Move
    to HLD or README.
 
-3. `"The build ships .env.example with key slots"` — file path/config
+3. `"The app ships .env.example with key slots"` — file path/config
    detail. Move to HLD or README.
 
 4. `"all read from the same OTel event spine Phase A produces"` — architecture
@@ -28,7 +28,7 @@
 9. `"pause the projection consumer"` — implementation/test mechanism. Move to
    LLD/test plan.
 
-10. ``"`docker compose up` remains the build surface"`` — delivery/runtime
+10. ``"`docker compose up` remains the runtime surface"`` — delivery/runtime
     command. Move to README.
 
 11. `"routes in the same Next.js app"` — framework/architecture decision. Move
@@ -67,7 +67,7 @@
    ui, at storage level we need to keep exact amounts
 7. **Pricing snapshot:** Missing versioning/update behavior. Engineer would ask:
    what happens when a model exists in traces but not in pricing, or when
-   provider pricing changes after build? ans: we need to consider fixed
+   provider pricing changes after release? ans: we need to consider fixed
    prices for provider rn not need for dynamic setup
 8. **Replay input fidelity:** “exact original input” is underspecified. Engineer
    would ask: does this include system prompt, tools, temperature, max tokens,

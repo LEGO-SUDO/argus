@@ -56,7 +56,7 @@ Not executable enough. The LLD must name the endpoint, content type, payload enc
 
 > “No changes to `src/index.ts` — existing PrismaClient export and re-exports cover the new types automatically.”
 
-This is false for the current repo. [packages/db/src/index.ts](/Users/lego/Desktop/personal-projects/chatapp/packages/db/src/index.ts:25) explicitly exports a fixed type list. If builders need `InferenceKind` from `@argus/db`, acceptance must include exporting it.
+This is false for the current repo. [packages/db/src/index.ts](/Users/lego/Desktop/personal-projects/argus/packages/db/src/index.ts:25) explicitly exports a fixed type list. If builders need `InferenceKind` from `@argus/db`, acceptance must include exporting it.
 
 > “Add three indexes on the three new columns since they are Phase B query filter columns.”
 
@@ -98,7 +98,7 @@ The repo uses CommonJS Jest configs (`apps/workers/jest.config.js`, `apps/api/je
 
 > “`apps/workers/README.md`”
 
-This file does not exist in the current repo. Task 40 should say create it, or document in root [README.md](/Users/lego/Desktop/personal-projects/chatapp/README.md:1).
+This file does not exist in the current repo. Task 40 should say create it, or document in root [README.md](/Users/lego/Desktop/personal-projects/argus/README.md:1).
 
 > “Verify: `pnpm --filter @argus/contracts test __tests__/sse.test.ts`”
 

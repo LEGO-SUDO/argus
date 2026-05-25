@@ -12,12 +12,12 @@ revision: 3
 
 ## Problem
 
-Phase A captures inference metadata but does not expose it. Phase B builds the reviewer-facing surface that uses that captured stream to demonstrate observability, cost literacy, and cross-provider thinking — shifting the reviewer's question from *"does the chatbot work"* to *"would I want this candidate owning our first volume customer's inference stack."*
+Phase A captures inference metadata but does not expose it. Phase B builds the operator-facing surface that turns that captured stream into observability, cost literacy, and cross-provider insight — shifting the question from *"does the chatbot work"* to *"can we see, price, and reason about every model call in production."*
 
 ## Target Users
 
-- **Primary — Argus operator.** ~3 minutes in `/console`, deciding whether the build clears the senior-level bar.
-- **Secondary — the candidate, production.** The template for Argus's first volume customer.
+- **Primary — the operator.** A few minutes in `/console` to confirm the inference pipeline is healthy, on-budget, and reproducible.
+- **Secondary — the team running it in production.** The template for a first high-volume customer's inference stack.
 
 ## Scope
 
@@ -43,7 +43,7 @@ Chronological feed of inference events, newest first, auto-updating as new turns
 
 **Conversation reference.** Rendered as a clickable conversation title that filters Traces to that conversation. Deleted conversations render as the original title with " (deleted)" appended, still clickable.
 
-**Replay-run badge.** Replay-run inferences appear with a clear badge so the reviewer can see Replay is doing real work through the same pipeline.
+**Replay-run badge.** Replay-run inferences appear with a clear badge so the operator can see Replay is doing real work through the same pipeline.
 
 ### Cost tab
 
@@ -59,13 +59,13 @@ Aggregated spend in USD, grouped by conversation by default with one-click regro
 
 ### Replay tab
 
-The load-bearing demo. The reviewer picks a past inference from Traces — successful, failed, timed-out, or canceled — and opens a Replay detail view. Canceled inferences are eligible with a "partial input only" warning. Candidates respect the active Traces time window; changing the window while a Replay detail is open leaves that detail unaffected but narrows the candidate set for the next selection.
+The load-bearing demo. The operator picks a past inference from Traces — successful, failed, timed-out, or canceled — and opens a Replay detail view. Canceled inferences are eligible with a "partial input only" warning. Candidates respect the active Traces time window; changing the window while a Replay detail is open leaves that detail unaffected but narrows the candidate set for the next selection.
 
 **Original metadata.** The detail view surfaces whatever was captured: provider, model, latency, tokens, cost, input, output. Missing fields render as "—" with the captured error visible. The exact original input for replay is: system prompt, the user message that triggered the turn, full conversation history up to that turn, temperature, and max-tokens. Tools, attachments, and provider-specific parameters are excluded — chat is text-only and cross-provider replay needs a portable parameter set.
 
 **Replay against deleted conversation.** Allowed. Inference metadata persists on conversation delete; the conversation reference renders as "(deleted)" inline.
 
-**Re-run.** The reviewer picks a target provider and model from independent pickers; a "reset to original" restores the original pair in one click. Unavailable providers appear disabled with inline help offering Mock as an alternative. Replaying against the original provider is allowed (useful for non-determinism testing).
+**Re-run.** The operator picks a target provider and model from independent pickers; a "reset to original" restores the original pair in one click. Unavailable providers appear disabled with inline help offering Mock as an alternative. Replaying against the original provider is allowed (useful for non-determinism testing).
 
 **Side-by-side view.** Results render side-by-side with deltas for cost and latency, plus a word-level highlighted diff of the output. A toggle switches between the highlighted diff and raw side-by-side panes. Each pane has an expand control opening the full content in a scrollable detail view.
 
@@ -83,7 +83,7 @@ All three tabs reflect a new inference within roughly 5 seconds. A persistent ba
 
 ### Empty-state and sample data
 
-A reviewer opening `/console` before any traffic sees a friendly empty state on each tab with a deep link to `/chat` and a "Generate sample inferences" button that seeds a handful of synthetic inferences (varied models, varied conversations) so all tabs populate immediately.
+A operator opening `/console` before any traffic sees a friendly empty state on each tab with a deep link to `/chat` and a "Generate sample inferences" button that seeds a handful of synthetic inferences (varied models, varied conversations) so all tabs populate immediately.
 
 **Lifetime.** Sample data is scoped to the current auth session (cookie). Logout + new login = fresh session with no sample-data visibility from the prior session. Per-user isolation is preserved across sessions of the same user — a re-login never sees another user's data.
 
@@ -113,7 +113,7 @@ New to Phase B:
 
 ## Success Criteria
 
-A reviewer can verify all of the following without help from the candidate:
+An operator can verify all of the following independently:
 
 - A chat turn routes to the selected provider (or the Auto-routed provider); the answering provider is visible in `/chat` per turn and in Traces per row. *(requires real keys for non-Mock turns)*
 - With one configured provider deliberately broken, the next turn fails over within the 3-attempt budget and the Traces row shows the full attempt chain. *(requires real keys)*
@@ -126,15 +126,15 @@ A reviewer can verify all of the following without help from the candidate:
 - The Traces throughput strip shows non-zero turns/hour and tokens/hour after a short demo session (classifier and replay inferences excluded from the count).
 - The live badge transitions green → amber when ingestion is artificially lagged, → error when the heartbeat is killed for 30s, and recovers when restored.
 - The "Generate sample inferences" button populates all tabs in under 5 seconds; Clear opens the type-to-confirm modal with an accurate count and returns the user's data to empty.
-- Observability-vocabulary check: the reviewer can point at concrete surfaces in `/console` for *Latency* (Traces row), *Throughput* (Traces strip), and *Errors* (Traces strip and status column).
+- Observability-vocabulary check: the operator can point at concrete surfaces in `/console` for *Latency* (Traces row), *Throughput* (Traces strip), and *Errors* (Traces strip and status column).
 
 ## Open Questions
 
-- **Scope size acknowledgment.** Cross-model review (Codex) raised 8 scope-creep risks across the three tabs (real providers + Auto classifier + failover with attempt chain + word-level diff + Cost grouping/drilldown/sparkline + Live badge state machine + sample-data lifecycle + Replay provider/model matrix). User answers expanded scope rather than cut it. The PRD locks at this scope; if delivery pressure forces a cut, the easiest descopes in order are: drop Auto routing classifier (simplify to keyword heuristic), drop word-level diff (raw side-by-side only), drop sample-data Generate/Clear flow (start empty, document keyless demo loads slowly). Reviewer concerns acknowledged: word-level diff polish, live badge complexity, sample-data lifecycle, classifier-as-second-inference.
+- **Scope size acknowledgment.** Cross-model review (Codex) raised 8 scope-creep risks across the three tabs (real providers + Auto classifier + failover with attempt chain + word-level diff + Cost grouping/drilldown/sparkline + Live badge state machine + sample-data lifecycle + Replay provider/model matrix). User answers expanded scope rather than cut it. The PRD locks at this scope; if delivery pressure forces a cut, the easiest descopes in order are: drop Auto routing classifier (simplify to keyword heuristic), drop word-level diff (raw side-by-side only), drop sample-data Generate/Clear flow (start empty, document keyless demo loads slowly). Operator concerns acknowledged: word-level diff polish, live badge complexity, sample-data lifecycle, classifier-as-second-inference.
 
 ## Constraints
 
 - **Build effort is unbounded — polish over speed.** The 5-second end-to-end runtime budget is a quality bar, not build-time pressure.
 - **Phase B reuses Phase A's data foundation.** Phase B may add columns or supporting tables for replay-run tagging and sample-data scoping, but does not introduce a parallel ingestion path or duplicate the inference data model.
-- **Real-provider keys are reviewer-supplied.** The keyless Mock path remains the default; success criteria requiring real keys are labeled inline.
+- **Real-provider keys are operator-supplied.** The keyless Mock path remains the default; success criteria requiring real keys are labeled inline.
 - **One cohesive product surface.** `/chat` and `/console` share the same auth and are documented as a deliberate demo-vs-prod tradeoff. Phase B does not split them.
