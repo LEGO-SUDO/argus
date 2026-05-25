@@ -1,19 +1,25 @@
-// Argus Chatbot Phase A — Prisma schema.
+// Argus — Prisma schema (Phase A chat + Phase B operator console).
 //
 // HLD D4 reference:
-//   - Five core tables: users, sessions, conversations, messages, inferences
-//   - One projection table: trace_events
+//   - Six core tables: users, sessions, conversations, messages, inferences,
+//     and the projection table trace_events
+//   - Two Phase B operator tables: sample_workspaces (Generate-Samples runs)
+//     and user_clear_fences (the Clear-history soft-delete fence)
+//   - InferenceKind enum (chat|classifier|replay|sample|heartbeat|unknown)
+//     classifies every inference + trace event; `chat` is the default and
+//     `unknown` is reserved for OTel values the consumer doesn't recognize
 //   - Cost columns stored as integer micro-USD (no float drift)
-//   - user_id denormalized on inferences + trace_events (Phase B reads filter
+//   - user_id denormalized on inferences + trace_events (console reads filter
 //     on user_id without JOINs)
 //   - (message_id) is a regular index on inferences, NOT unique — failover
 //     attempts share the same message_id, one row per attempt
-//   - (trace_id, span_id) UNIQUE on trace_events — projection consumer
-//     idempotency guard
-//   - trace_events.payload is Jsonb — Phase B Replay queries fields without
+//   - (trace_id, span_id, name) UNIQUE on trace_events — projection consumer
+//     idempotency guard (widened from (trace_id, span_id) in migration 0003 so
+//     a span's multiple named events both persist on first delivery)
+//   - trace_events.payload is Jsonb — Replay queries fields without
 //     rehydration; capped at 100KB per OTel span event
 //   - (user_id, created_at desc) compound index on inferences + trace_events
-//     to back Phase B per-user feed queries
+//     to back per-user console feed queries
 //
 // Ownership boundary (load-bearing — see lld-backend-infra §Tasks):
 //   - messages.status is owned by the API gateway, written synchronously.
