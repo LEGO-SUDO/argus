@@ -130,8 +130,12 @@ export class ReplayService {
       userId: input.userId,
       messageId: assistantMessageId,
       signal: abort.signal,
-      provider: input.provider,
-      model: input.model,
+      // REVIEW-BRIEF Finding 5 (R1): the router targets a specific adapter ONLY
+      // via `req.pin` — it never reads the `provider`/`model` hint fields (those
+      // are ignored by the SDK). Passing them as a pin makes the override branch
+      // route to the chosen provider and surface "not configured" inline when it
+      // isn't, instead of silently re-running against the default router head.
+      pin: { provider: input.provider, model: input.model },
     });
     const orchestrator = new StreamOrchestrator(this.chat, this.seqRegistry, {
       messageId: assistantMessageId,

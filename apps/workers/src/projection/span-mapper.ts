@@ -16,6 +16,7 @@
 import { Logger } from '@nestjs/common';
 import {
   OTEL_ATTRS,
+  SPAN_EVENT_NAMES,
   LLM_KIND,
   LLM_SAMPLE_WORKSPACE_ID,
   LLM_REPLAY_OF_INFERENCE_ID,
@@ -25,6 +26,7 @@ import {
   type InferenceUpdate,
   type TraceEventInsert,
 } from '@argus/contracts';
+import { previewOf } from './preview';
 
 // Verdict the mapper produces. Extends the contracts-owned InferenceUpdate with
 // the Phase B columns the projection consumer now writes. Kept local to the
@@ -96,6 +98,19 @@ export function mapSpanToProjection(span: OtlpSpan): SpanProjectionPhaseB {
   const endedAt = unixNanoToDate(span.endTimeUnixNano);
   const latencyMs = Math.max(0, endedAt.getTime() - startedAt.getTime());
 
+  // Previews are derived from the body events the SDK already emits — the
+  // dedicated `llm.*_preview` attributes are never set on the write path
+  // (REVIEW-BRIEF Finding 1). We still PREFER an explicit attribute when one is
+  // present (forward-compat if a future producer sets it), falling back to the
+  // body. `evt.body ?? evt.attributes` mirrors what we store as the payload, so
+  // the preview is derived from the exact same source of truth.
+  const inputEvent = span.events.find((e) => e.name === SPAN_EVENT_NAMES.LLM_INPUT);
+  const outputEvent = span.events.find((e) => e.name === SPAN_EVENT_NAMES.LLM_OUTPUT);
+  const inputPreview =
+    attrs[OTEL_ATTRS.LLM_INPUT_PREVIEW] ?? previewOf(inputEvent?.body ?? inputEvent?.attributes);
+  const outputPreview =
+    attrs[OTEL_ATTRS.LLM_OUTPUT_PREVIEW] ?? previewOf(outputEvent?.body ?? outputEvent?.attributes);
+
   const inference: PhaseBInferenceVerdict = {
     messageId: attrs[OTEL_ATTRS.MESSAGE_ID],
     conversationId: attrs[OTEL_ATTRS.CONVERSATION_ID],
@@ -110,8 +125,8 @@ export function mapSpanToProjection(span: OtlpSpan): SpanProjectionPhaseB {
     completionCostUsdMicros: attrs[OTEL_ATTRS.LLM_COMPLETION_COST_USD_MICROS],
     startedAt,
     endedAt,
-    inputPreview: attrs[OTEL_ATTRS.LLM_INPUT_PREVIEW],
-    outputPreview: attrs[OTEL_ATTRS.LLM_OUTPUT_PREVIEW],
+    inputPreview,
+    outputPreview,
     traceId: span.traceId,
     spanId: span.spanId,
     errorCode: attrs[OTEL_ATTRS.LLM_ERROR_CODE],
