@@ -57,14 +57,12 @@ const PRICEBOOK: Record<string, CatalogEntry> = {
   'anthropic:claude-3-haiku-20240307': { promptPerMillion: 0.25, completionPerMillion: 1.25, contextWindow: 200_000 },
 
   // ---- Google ----
-  // Gemini 3.x is preview; Google hasn't published rates so price as zero
-  // (operator console renders "—"). Context windows are public though: the
-  // 3-flash-preview and 2.0-flash-exp inherit the 1.5-flash 1M-token ceiling;
-  // 1.5-pro extends to 2M.
-  'gemini:gemini-3-flash-preview': { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 1_048_576 },
-  'gemini:gemini-2.0-flash-exp': { promptPerMillion: 0, completionPerMillion: 0, contextWindow: 1_048_576 },
-  'gemini:gemini-1.5-flash': { promptPerMillion: 0.075, completionPerMillion: 0.3, contextWindow: 1_048_576 },
-  'gemini:gemini-1.5-pro': { promptPerMillion: 1.25, completionPerMillion: 5.0, contextWindow: 2_097_152 },
+  // Gemini 2.5 family (current GA). Rates are approximate published list
+  // prices (USD per million tokens) and may drift — adjust if Google revises.
+  // Flash/Flash-Lite carry a 1M-token window; Pro extends to 2M.
+  'gemini:gemini-2.5-flash': { promptPerMillion: 0.3, completionPerMillion: 2.5, contextWindow: 1_048_576 },
+  'gemini:gemini-2.5-pro': { promptPerMillion: 1.25, completionPerMillion: 10.0, contextWindow: 2_097_152 },
+  'gemini:gemini-2.5-flash-lite': { promptPerMillion: 0.1, completionPerMillion: 0.4, contextWindow: 1_048_576 },
 
   // ---- Mock ----
   // Free + small window — keeps dev runs visible. The 8k cap lets the

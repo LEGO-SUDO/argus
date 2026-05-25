@@ -69,8 +69,8 @@ describe('cost.getCatalogEntry (Tasks 15/16)', () => {
     expect(getCatalogEntry('openai', 'gpt-3.5-turbo')!.contextWindow).toBe(16_000);
     expect(getCatalogEntry('anthropic', 'claude-haiku-4-5')!.contextWindow).toBe(200_000);
     expect(getCatalogEntry('anthropic', 'claude-3-haiku-20240307')!.contextWindow).toBe(200_000);
-    expect(getCatalogEntry('gemini', 'gemini-3-flash-preview')!.contextWindow).toBe(1_048_576);
-    expect(getCatalogEntry('gemini', 'gemini-1.5-pro')!.contextWindow).toBe(2_097_152);
+    expect(getCatalogEntry('gemini', 'gemini-2.5-flash')!.contextWindow).toBe(1_048_576);
+    expect(getCatalogEntry('gemini', 'gemini-2.5-pro')!.contextWindow).toBe(2_097_152);
     expect(getCatalogEntry('mock', 'mock-1')!.contextWindow).toBe(8192);
   });
 

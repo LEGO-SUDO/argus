@@ -1,13 +1,12 @@
-// Tests for the Gemini adapter (Interactions API, fetch-based).
+// Tests for the Gemini adapter (Generative Language API, fetch-based).
 //
-// We stub `fetch` to return a synthesized SSE body that mirrors the real
-// API event sequence (interaction.created → step.start (thought) →
-// step.delta thought_signature → step.stop → step.start (model_output) →
-// step.delta text → step.stop → interaction.completed → done).
+// We stub `fetch` to return a synthesized SSE body matching the real
+// `:streamGenerateContent?alt=sse` shape: CRLF-separated `data:` blocks, each
+// a GenerateContentResponse chunk with candidates[].content.parts[].text and a
+// trailing usageMetadata.
 
 import { GeminiAdapter } from '../providers/gemini';
 import type { ChatStreamChunk, ChatStreamRequest } from '../index';
-import { ProviderError } from '../index';
 
 function makeReq(overrides: Partial<ChatStreamRequest> = {}): ChatStreamRequest {
   return {
@@ -37,60 +36,39 @@ function sseResponse(body: string, init?: ResponseInit): Response {
   return new Response(stream, init ?? { status: 200 });
 }
 
-function happyPathSse(text: string, inputTokens = 8, outputTokens = 7): string {
-  // Each event block separated by \n\n per SSE spec.
-  return [
-    `event: interaction.created\ndata: ${JSON.stringify({
-      interaction: { id: 'v1_abc', status: 'in_progress', model: 'gemini-3-flash-preview' },
-      event_type: 'interaction.created',
-    })}`,
-    `event: step.start\ndata: ${JSON.stringify({
-      index: 0,
-      step: { type: 'thought' },
-      event_type: 'step.start',
-    })}`,
-    `event: step.delta\ndata: ${JSON.stringify({
-      index: 0,
-      delta: { signature: 'opaque', type: 'thought_signature' },
-      event_type: 'step.delta',
-    })}`,
-    `event: step.stop\ndata: ${JSON.stringify({ index: 0, event_type: 'step.stop' })}`,
-    `event: step.start\ndata: ${JSON.stringify({
-      index: 1,
-      step: { type: 'model_output' },
-      event_type: 'step.start',
-    })}`,
-    `event: step.delta\ndata: ${JSON.stringify({
-      index: 1,
-      delta: { text, type: 'text' },
-      event_type: 'step.delta',
-    })}`,
-    `event: step.stop\ndata: ${JSON.stringify({ index: 1, event_type: 'step.stop' })}`,
-    `event: interaction.completed\ndata: ${JSON.stringify({
-      interaction: {
-        id: 'v1_abc',
-        status: 'completed',
-        usage: {
-          total_input_tokens: inputTokens,
-          total_output_tokens: outputTokens,
-        },
-        model: 'gemini-3-flash-preview',
-      },
-      event_type: 'interaction.completed',
-    })}`,
-    `event: done\ndata: [DONE]`,
-    '', // trailing newline so the final block is parsed
-  ].join('\n\n');
+// Real Gemini SSE: `data: {json}` blocks separated by CRLF (\r\n\r\n).
+function dataBlock(obj: unknown): string {
+  return `data: ${JSON.stringify(obj)}\r\n\r\n`;
 }
 
-describe('GeminiAdapter (Interactions API)', () => {
+// Two streamed text chunks + a final chunk carrying usageMetadata, mirroring
+// how the live API drips tokens then reports usage on the last event.
+function happyPathSse(part1 = 'Hello, ', part2 = 'how are you?', inputTokens = 8, outputTokens = 7): string {
+  return (
+    dataBlock({
+      candidates: [{ content: { parts: [{ text: part1 }], role: 'model' }, index: 0 }],
+    }) +
+    dataBlock({
+      candidates: [
+        { content: { parts: [{ text: part2 }], role: 'model' }, finishReason: 'STOP', index: 0 },
+      ],
+      usageMetadata: {
+        promptTokenCount: inputTokens,
+        candidatesTokenCount: outputTokens,
+        totalTokenCount: inputTokens + outputTokens,
+      },
+    })
+  );
+}
+
+describe('GeminiAdapter (Generative Language API)', () => {
   it('isConfigured reflects the API key', () => {
     expect(new GeminiAdapter({ apiKey: 'k' }).isConfigured()).toBe(true);
     expect(new GeminiAdapter({ apiKey: '' }).isConfigured()).toBe(false);
   });
 
-  it('streams text deltas from model_output steps, skipping thought signatures', async () => {
-    const fetchStub = jest.fn(async () => sseResponse(happyPathSse('Hello, how are you today?')));
+  it('streams text from candidate parts and reports usage on done', async () => {
+    const fetchStub = jest.fn(async () => sseResponse(happyPathSse()));
     const adapter = new GeminiAdapter({
       apiKey: 'k',
       fetchImpl: fetchStub as unknown as typeof fetch,
@@ -98,20 +76,26 @@ describe('GeminiAdapter (Interactions API)', () => {
 
     const chunks = await collect(adapter.stream(makeReq()));
 
-    const tokens = chunks.filter((c) => c.type === 'token').map((c) => (c as { type: 'token'; content: string }).content);
-    expect(tokens).toEqual(['Hello, how are you today?']);
+    const tokens = chunks
+      .filter((c) => c.type === 'token')
+      .map((c) => (c as { type: 'token'; content: string }).content);
+    expect(tokens.join('')).toBe('Hello, how are you?');
 
     const done = chunks.find((c) => c.type === 'done') as
-      | { type: 'done'; providerMeta: { provider: string; model: string; promptTokens?: number; completionTokens?: number } }
+      | {
+          type: 'done';
+          providerMeta: { provider: string; model: string; promptTokens?: number; completionTokens?: number };
+        }
       | undefined;
     expect(done).toBeDefined();
     expect(done!.providerMeta.provider).toBe('gemini');
+    expect(done!.providerMeta.model).toBe('gemini-2.5-flash');
     expect(done!.providerMeta.promptTokens).toBe(8);
     expect(done!.providerMeta.completionTokens).toBe(7);
   });
 
-  it('hits the Interactions endpoint with x-goog-api-key + Api-Revision headers', async () => {
-    const fetchStub = jest.fn(async () => sseResponse(happyPathSse('hi')));
+  it('hits :streamGenerateContent?alt=sse with x-goog-api-key + contents body', async () => {
+    const fetchStub = jest.fn(async () => sseResponse(happyPathSse()));
     const adapter = new GeminiAdapter({
       apiKey: 'TEST_KEY',
       fetchImpl: fetchStub as unknown as typeof fetch,
@@ -121,37 +105,35 @@ describe('GeminiAdapter (Interactions API)', () => {
 
     expect(fetchStub).toHaveBeenCalledTimes(1);
     const [url, init] = fetchStub.mock.calls[0]!;
-    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/interactions');
+    expect(url).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+    );
     const headers = init!.headers as Record<string, string>;
     expect(headers['x-goog-api-key']).toBe('TEST_KEY');
-    expect(headers['Api-Revision']).toBe('2026-05-20');
     expect(headers['Content-Type']).toBe('application/json');
     const body = JSON.parse(init!.body as string);
-    expect(body.model).toBe('gemini-3-flash-preview');
-    expect(body.stream).toBe(true);
-    expect(body.input).toBe('hi');
+    expect(body.contents).toEqual([{ role: 'user', parts: [{ text: 'hi' }] }]);
   });
 
-  it('uses req.pin.model in the outbound request body, overriding env/default (Codex review #1)', async () => {
-    const fetchStub = jest.fn(async () => sseResponse(happyPathSse('hi')));
-    // No model opt and no env — would default to gemini-3-flash-preview.
+  it('uses req.pin.model in the request URL + done meta, overriding default', async () => {
+    const fetchStub = jest.fn(async () => sseResponse(happyPathSse()));
     const adapter = new GeminiAdapter({
       apiKey: 'k',
       fetchImpl: fetchStub as unknown as typeof fetch,
     });
     const chunks = await collect(
-      adapter.stream(makeReq({ pin: { provider: 'gemini', model: 'gemini-1.5-pro' } })),
+      adapter.stream(makeReq({ pin: { provider: 'gemini', model: 'gemini-2.5-pro' } })),
     );
-    const body = JSON.parse(fetchStub.mock.calls[0]![1]!.body as string);
-    expect(body.model).toBe('gemini-1.5-pro');
+    const [url] = fetchStub.mock.calls[0]!;
+    expect(url).toContain('/models/gemini-2.5-pro:streamGenerateContent');
     const done = chunks.find((c) => c.type === 'done') as
       | { type: 'done'; providerMeta: { model: string } }
       | undefined;
-    expect(done!.providerMeta.model).toBe('gemini-1.5-pro');
+    expect(done!.providerMeta.model).toBe('gemini-2.5-pro');
   });
 
-  it('concatenates multi-turn messages into the input string with role labels', async () => {
-    const fetchStub = jest.fn(async () => sseResponse(happyPathSse('ok')));
+  it('maps roles (assistant→model) and pulls system into systemInstruction', async () => {
+    const fetchStub = jest.fn(async () => sseResponse(happyPathSse()));
     const adapter = new GeminiAdapter({
       apiKey: 'k',
       fetchImpl: fetchStub as unknown as typeof fetch,
@@ -161,6 +143,7 @@ describe('GeminiAdapter (Interactions API)', () => {
       adapter.stream(
         makeReq({
           messages: [
+            { role: 'system', content: 'be terse' },
             { role: 'user', content: 'one' },
             { role: 'assistant', content: 'two' },
             { role: 'user', content: 'three' },
@@ -170,14 +153,16 @@ describe('GeminiAdapter (Interactions API)', () => {
     );
 
     const body = JSON.parse(fetchStub.mock.calls[0]![1]!.body as string);
-    expect(body.input).toBe('USER: one\n\nASSISTANT: two\n\nUSER: three');
+    expect(body.contents).toEqual([
+      { role: 'user', parts: [{ text: 'one' }] },
+      { role: 'model', parts: [{ text: 'two' }] },
+      { role: 'user', parts: [{ text: 'three' }] },
+    ]);
+    expect(body.systemInstruction).toEqual({ parts: [{ text: 'be terse' }] });
   });
 
-  it('throws ProviderError with mapped code on non-200', async () => {
-    const fetchStub = jest.fn(
-      async () =>
-        new Response('not allowed', { status: 401 }),
-    );
+  it('throws ProviderError with mapped code on non-200 (401 → auth_error)', async () => {
+    const fetchStub = jest.fn(async () => new Response('not allowed', { status: 401 }));
     const adapter = new GeminiAdapter({
       apiKey: 'k',
       fetchImpl: fetchStub as unknown as typeof fetch,
@@ -221,7 +206,7 @@ describe('GeminiAdapter (Interactions API)', () => {
         err.name = 'AbortError';
         throw err;
       }
-      return sseResponse(happyPathSse('x'));
+      return sseResponse(happyPathSse());
     });
     const controller = new AbortController();
     controller.abort();
