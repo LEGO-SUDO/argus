@@ -1,44 +1,33 @@
-// Google Gemini streaming adapter — Interactions API (v1beta).
+// Google Gemini streaming adapter — Generative Language API (v1beta).
 //
-// Google's `/v1beta/models/<name>:streamGenerateContent` endpoint that the
-// `@google/generative-ai` package wraps is being replaced by a new unified
-// Interactions API:
+//   POST https://generativelanguage.googleapis.com/v1beta/models/<model>:streamGenerateContent?alt=sse
+//   Headers:  x-goog-api-key, Content-Type: application/json
+//   Body:     { contents: [{ role: 'user'|'model', parts: [{text}] }],
+//               systemInstruction?: { parts: [{text}] } }
+//   Response: Server-Sent Events — each `data:` line is one
+//             GenerateContentResponse chunk:
+//               { candidates: [{ content: { parts: [{text}], role: 'model' },
+//                                finishReason }],
+//                 usageMetadata: { promptTokenCount, candidatesTokenCount,
+//                                  totalTokenCount } }
 //
-//   POST https://generativelanguage.googleapis.com/v1beta/interactions
-//   Headers:  x-goog-api-key, Api-Revision: 2026-05-20
-//   Body:     { model, input: string, stream: true }
-//   Response: Server-Sent Events with named event types
-//               (interaction.created, step.start, step.delta,
-//                step.stop, interaction.completed, done)
+// Plain `fetch` (no vendor SDK) so we own the streaming shape directly. The
+// `?alt=sse` query param makes the endpoint emit proper SSE instead of a
+// streamed JSON array.
 //
-// We implement this with plain `fetch` rather than a vendor SDK because the
-// official package still targets the legacy endpoint as of this writing.
+// Role mapping: user→'user', assistant→'model'. `system` messages are pulled
+// into Gemini's dedicated `systemInstruction` field rather than inlined.
 //
-// Multi-turn limitation: the Interactions API takes `input: string`, not a
-// messages array. We concatenate the conversation with role labels into a
-// single input string. Loses some fidelity vs proper role-tagged turns but
-// is sufficient for the chat UX. When/if Google ships a messages-aware
-// shape, this concatenation is the single line to replace.
-//
-// Event mapping (only model-visible output emitted as tokens):
-//   - step.start { step.type: 'thought' }       → enter thought mode (skip text)
-//   - step.start { step.type: 'model_output' }  → enter output mode (emit text)
-//   - step.delta { delta.type: 'text' }         → if in output mode, emit token
-//   - step.delta { delta.type: 'thought_signature' } → skip
-//   - interaction.completed                     → extract usage → emit done frame
-//   - done                                      → close
-//
-// Failure model matches OpenAI/Anthropic adapters: non-200 before any text
-// → ProviderError pre-first-token (router fails over). Network error mid-
-// stream → propagates to orchestrator which terminates the turn.
+// Failure model matches OpenAI/Anthropic adapters: non-200 before any text →
+// ProviderError pre-first-token (router fails over). Network error mid-stream →
+// propagates to the orchestrator which terminates the turn.
 
 import type { ProviderAdapter } from './types';
 import type { ChatMessage, ChatStreamChunk, ChatStreamRequest } from '../index';
 import { ProviderError } from '../index';
 
-const DEFAULT_MODEL = 'gemini-3-flash-preview';
-const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
-const API_REVISION = '2026-05-20';
+const DEFAULT_MODEL = 'gemini-2.5-flash';
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 export interface GeminiAdapterOptions {
   /** Override the env-derived API key (tests). */
@@ -47,7 +36,7 @@ export interface GeminiAdapterOptions {
   model?: string;
   /** Override fetch implementation (tests). */
   fetchImpl?: typeof fetch;
-  /** Override endpoint (tests). */
+  /** Override the full request URL (tests). When set, used verbatim. */
   endpoint?: string;
 }
 
@@ -60,16 +49,10 @@ export class GeminiAdapter implements ProviderAdapter {
     return Boolean(this.opts.apiKey ?? process.env.GOOGLE_API_KEY);
   }
 
-  // LLD Task 23 — Gemini model ids advertised to the picker. Matches the
-  // gemini:* keys in cost.ts PRICEBOOK (3-flash-preview, 2.0-flash-exp,
-  // 1.5-flash, 1.5-pro).
+  // Current generally-available Gemini text models. Matches the gemini:* keys
+  // in cost.ts PRICEBOOK; the catalog accessor joins on (provider, model).
   listModels(): string[] {
-    return [
-      'gemini-3-flash-preview',
-      'gemini-2.0-flash-exp',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
-    ];
+    return ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite'];
   }
 
   async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
@@ -77,13 +60,18 @@ export class GeminiAdapter implements ProviderAdapter {
     if (!apiKey) {
       throw new ProviderError('provider_not_configured', 'GOOGLE_API_KEY not set');
     }
-    // chat-context-and-ux-polish (Codex review #1) — pin's model wins over
-    // opts/env/default. See the matching comment in providers/openai.ts.
+    // Pin's model wins over opts/env/default (matches openai/anthropic).
     const model = req.pin?.model ?? this.opts.model ?? process.env.GOOGLE_MODEL ?? DEFAULT_MODEL;
-    const endpoint = this.opts.endpoint ?? ENDPOINT;
+    const endpoint =
+      this.opts.endpoint ??
+      `${BASE_URL}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
     const fetchImpl = this.opts.fetchImpl ?? fetch;
 
-    const input = messagesToInput(req.messages);
+    const { contents, systemInstruction } = messagesToContents(req.messages);
+    const body: Record<string, unknown> = { contents };
+    if (systemInstruction) {
+      body.systemInstruction = { parts: [{ text: systemInstruction }] };
+    }
 
     let response: Response;
     try {
@@ -92,9 +80,8 @@ export class GeminiAdapter implements ProviderAdapter {
         headers: {
           'x-goog-api-key': apiKey,
           'Content-Type': 'application/json',
-          'Api-Revision': API_REVISION,
         },
-        body: JSON.stringify({ model, input, stream: true }),
+        body: JSON.stringify(body),
         signal: req.signal,
       });
     } catch (err) {
@@ -113,39 +100,29 @@ export class GeminiAdapter implements ProviderAdapter {
       throw new ProviderError('empty_response', 'gemini returned no response body');
     }
 
-    let currentStepType: 'thought' | 'model_output' | 'unknown' = 'unknown';
     let promptTokens: number | undefined;
     let completionTokens: number | undefined;
 
     for await (const evt of parseSseStream(response.body, req.signal)) {
-      if (evt.event === 'step.start') {
-        const stepType = evt.data?.step?.type;
-        currentStepType =
-          stepType === 'thought' || stepType === 'model_output' ? stepType : 'unknown';
-        continue;
-      }
-      if (evt.event === 'step.delta') {
-        const deltaType = evt.data?.delta?.type;
-        if (currentStepType === 'model_output' && deltaType === 'text') {
-          const text: string | undefined = evt.data?.delta?.text;
+      const data = evt.data;
+      if (!data || typeof data !== 'object') continue;
+
+      const parts = data.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          const text: unknown = part?.text;
           if (typeof text === 'string' && text.length > 0) {
             yield { type: 'token', content: text };
           }
         }
-        continue;
       }
-      if (evt.event === 'interaction.completed') {
-        const usage = evt.data?.interaction?.usage;
-        if (usage) {
-          promptTokens = numberOrUndefined(usage.total_input_tokens);
-          completionTokens = numberOrUndefined(usage.total_output_tokens);
-        }
-        continue;
+
+      // Usage lands on the final chunk(s); keep the latest seen.
+      const usage = data.usageMetadata;
+      if (usage) {
+        promptTokens = numberOrUndefined(usage.promptTokenCount);
+        completionTokens = numberOrUndefined(usage.candidatesTokenCount);
       }
-      if (evt.event === 'done') {
-        break;
-      }
-      // step.stop, interaction.status_update, anything else — no-op
     }
 
     yield {
@@ -163,20 +140,36 @@ export class GeminiAdapter implements ProviderAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 
-function messagesToInput(messages: ChatMessage[]): string {
-  // Single-turn fast path: just send the user content directly.
-  if (messages.length === 1 && messages[0]?.role === 'user') {
-    return messages[0].content;
+interface GeminiContent {
+  role: 'user' | 'model';
+  parts: { text: string }[];
+}
+
+/**
+ * Convert the provider-neutral message list into Gemini's `contents` array.
+ * `system` messages are collected into `systemInstruction` (Gemini's dedicated
+ * field); user→'user', assistant→'model'.
+ */
+function messagesToContents(messages: ChatMessage[]): {
+  contents: GeminiContent[];
+  systemInstruction?: string;
+} {
+  const systemParts: string[] = [];
+  const contents: GeminiContent[] = [];
+  for (const m of messages) {
+    if (m.role === 'system') {
+      systemParts.push(m.content);
+      continue;
+    }
+    contents.push({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    });
   }
-  // Multi-turn: concatenate with role labels. Loses role semantics but the
-  // Interactions API doesn't accept a messages array as of Api-Revision
-  // 2026-05-20.
-  return messages
-    .map((m) => {
-      const label = m.role === 'assistant' ? 'ASSISTANT' : m.role === 'system' ? 'SYSTEM' : 'USER';
-      return `${label}: ${m.content}`;
-    })
-    .join('\n\n');
+  return {
+    contents,
+    systemInstruction: systemParts.length > 0 ? systemParts.join('\n\n') : undefined,
+  };
 }
 
 interface SseEvent {
@@ -203,7 +196,9 @@ async function* parseSseStream(
       if (signal?.aborted) return;
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // Gemini SSE uses CRLF (events separated by \r\n\r\n). Strip CR so the
+      // \n\n block split and `data:`-line parsing work regardless of endings.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
       let sep: number;
       while ((sep = buffer.indexOf('\n\n')) !== -1) {
         const block = buffer.slice(0, sep);

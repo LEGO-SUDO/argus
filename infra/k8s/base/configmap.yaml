@@ -14,10 +14,11 @@ metadata:
   namespace: argus
 data:
   NODE_ENV: "production"
-  # Start TRUE so the first end-to-end deploy works with zero provider keys
-  # (deterministic mock responses). Flip to "false" and populate the provider
-  # keys in argus-secrets once the cluster is verified healthy.
-  MOCK_PROVIDER: "true"
+  # FALSE = use real providers (keys live in argus-secrets). Keep this in the
+  # repo (not just a live patch) — CI re-applies this ConfigMap on every deploy,
+  # so a live-only override gets reverted. Set TRUE only for a keyless/demo
+  # cluster (deterministic mock responses; SDK throws if false with no keys).
+  MOCK_PROVIDER: "false"
   CONTEXT_MAX_TOKENS: "6000"
 
   # Telemetry: api + workers export OTLP to the collector; api queries Jaeger.
@@ -31,8 +32,11 @@ data:
   LIVE_EVENTS_TOPIC: "live-events"
   LIVE_EVENTS_CONSUMER_GROUP: "api-live-fanout"
 
-  # Provider model overrides (optional; blank = SDK defaults).
-  OPENAI_MODEL: ""
-  ANTHROPIC_MODEL: ""
-  GOOGLE_MODEL: ""
-  PROVIDER_ORDER: ""
+  # Provider failover order. All three adapters are verified working against
+  # live keys (gemini uses the real streamGenerateContent API).
+  PROVIDER_ORDER: "openai,anthropic,gemini"
+  # WARNING: do NOT add OPENAI_MODEL/ANTHROPIC_MODEL/GOOGLE_MODEL set to "".
+  # The SDK resolves the model via `?? process.env.X ?? DEFAULT_MODEL`, and an
+  # empty string is NOT nullish — so "" gets sent as the model id and the
+  # provider rejects it (provider_error). Omit the key to use the SDK default,
+  # or set a real model id (e.g. OPENAI_MODEL: "gpt-4o").
