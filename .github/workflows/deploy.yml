@@ -1,0 +1,101 @@
+# ============================================================================
+# Build api + workers images, push to DigitalOcean Container Registry (DOCR),
+# run the Prisma migration, and roll the DOKS deployment.
+#
+# Web is NOT here — it deploys via Vercel's own Git integration.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   secrets.DIGITALOCEAN_ACCESS_TOKEN   DO API token with registry + k8s scope
+#   vars.DOCR_NAME                      DOCR registry name (e.g. "argus")
+#   vars.DOKS_CLUSTER                   DOKS cluster name (e.g. "argus-prod")
+# ============================================================================
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/workers/**"
+      - "packages/**"
+      - "infra/k8s/**"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.digitalocean.com
+  DOCR_NAME: ${{ vars.DOCR_NAME }}
+  CLUSTER_NAME: ${{ vars.DOKS_CLUSTER }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to DOCR
+        run: doctl registry login --expiry-seconds 1800
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build & push workers
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/workers/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-workers:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-workers:latest
+          cache-from: type=gha,scope=workers
+          cache-to: type=gha,mode=max,scope=workers
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Save kubeconfig
+        run: doctl kubernetes cluster kubeconfig save "${{ env.CLUSTER_NAME }}"
+
+      - name: Pin image tags to this commit
+        working-directory: infra/k8s/overlays/prod
+        run: |
+          kustomize edit set image \
+            argus-api=${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-api:${{ github.sha }} \
+            argus-workers=${{ env.REGISTRY }}/${{ env.DOCR_NAME }}/argus-workers:${{ github.sha }}
+
+      - name: Apply manifests + run migration
+        run: |
+          # Jobs are immutable; drop the prior migrate Job so the new image applies.
+          kubectl delete job db-migrate -n argus --ignore-not-found
+          kubectl apply -k infra/k8s/overlays/prod
+          echo "Waiting for DB migration to complete..."
+          kubectl wait --for=condition=complete job/db-migrate -n argus --timeout=240s
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deploy/api -n argus --timeout=300s
+          kubectl rollout status deploy/workers -n argus --timeout=300s

@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argus
+
+resources:
+  - ../../base
+
+# Point the placeholder image names at your DigitalOcean Container Registry.
+# Replace REPLACE_REGISTRY with your DOCR name (e.g. registry.digitalocean.com/argus).
+# CI overrides `newTag` per build via `kustomize edit set image` (commit SHA).
+images:
+  - name: argus-api
+    newName: registry.digitalocean.com/REPLACE_REGISTRY/argus-api
+    newTag: latest
+  - name: argus-workers
+    newName: registry.digitalocean.com/REPLACE_REGISTRY/argus-workers
+    newTag: latest
