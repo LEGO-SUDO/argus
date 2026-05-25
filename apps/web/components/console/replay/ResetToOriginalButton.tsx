@@ -16,7 +16,7 @@ export function ResetToOriginalButton({ onReset, disabled }: ResetToOriginalButt
       aria-label="Reset provider and model to the original"
       disabled={disabled}
       onClick={() => onReset()}
-      className="min-h-8 rounded-[6px] border border-chat-rule px-2.5 py-1 text-[12px] font-medium text-chat-ink-2 hover:bg-chat-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc disabled:cursor-not-allowed disabled:opacity-40"
+      className="min-h-8 rounded-[6px] border border-con-rule px-2.5 py-1 text-[12px] font-medium text-con-dim hover:bg-con-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc disabled:cursor-not-allowed disabled:opacity-40"
     >
       Reset to original
     </button>

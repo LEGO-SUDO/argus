@@ -1,14 +1,16 @@
-// FreeTextSearchInput — debounced free-text search box (LLD Tasks 98-99).
+// FreeTextSearchInput — debounced free-text search box, reskinned to
+// .con-search (REVIEW-BRIEF Finding 4, LLD Tasks 98-99).
 //
-// Emits the TRIMMED query to `onChange` exactly once at the debounce boundary
-// (via use-debounced-callback), so a fast typist does not trigger a refetch per
-// keystroke. Clearing the input emits an empty string.
+// Emits the TRIMMED query to `onChange` exactly once at the debounce boundary.
+// The wrapper renders as .con-search (inline in the .con-tools bar) instead of
+// the previous card panel.
 
 'use client';
 
 import { useState } from 'react';
 
 import { useDebouncedCallback } from '@/lib/use-debounced-callback';
+import { Icon } from '../Icon';
 
 export type FreeTextSearchInputProps = {
   initialValue?: string;
@@ -25,7 +27,8 @@ export function FreeTextSearchInput({
   const emit = useDebouncedCallback((query: string) => onChange(query), debounceMs);
 
   return (
-    <div className="relative">
+    <div className="con-search">
+      <Icon name="search" size={12} aria-hidden="true" />
       <label htmlFor="console-traces-search" className="sr-only">
         Search traces
       </label>
@@ -34,14 +37,13 @@ export function FreeTextSearchInput({
         type="search"
         data-testid="console-filter-search-input"
         aria-label="Search traces"
-        placeholder="Search prompts / responses…"
+        placeholder="search input previews…"
         value={text}
         onChange={(e) => {
           const next = e.target.value;
           setText(next);
           emit(next.trim());
         }}
-        className="min-h-9 w-full rounded-[6px] border border-chat-rule bg-chat-bg px-2.5 py-1.5 text-[13px] text-chat-ink placeholder:text-chat-ink-3 outline-none focus:border-acc focus-visible:ring-2 focus-visible:ring-acc"
       />
     </div>
   );

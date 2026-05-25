@@ -1,11 +1,15 @@
 // Tests for <TraceRow /> (LLD Tasks 106-113).
+//
+// Reskin delta: TraceRow now renders a <tr> (table row) for the .con-table.
+// Tests wrap the render in <table><tbody> for valid HTML. All behavioral
+// assertions — testids, aria, Jaeger link, conversation link, replay badge,
+// token counts, expand toggle — are preserved unchanged.
 import { render, screen } from '@testing-library/react';
 import { TraceRow } from '@/components/console/traces/TraceRow';
 import type { TraceRow as TraceRowDto } from '@argus/contracts';
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const CONV = '22222222-2222-4222-8222-222222222222';
-
 const TRACE_ID = 'abcdef0123456789abcdef0123456789';
 
 const baseRow: TraceRowDto = {
@@ -30,9 +34,20 @@ const baseRow: TraceRowDto = {
   errorCode: null,
 };
 
+/** Render TraceRow inside a valid <table><tbody> wrapper. */
+function renderRow(props: Partial<React.ComponentProps<typeof TraceRow>> = {}) {
+  return render(
+    <table>
+      <tbody>
+        <TraceRow row={baseRow} {...props} />
+      </tbody>
+    </table>,
+  );
+}
+
 describe('<TraceRow /> standard render (Task 106)', () => {
   it('renders cells, the conversation link, and an exact Jaeger deep link in a new tab', () => {
-    render(<TraceRow row={baseRow} />);
+    renderRow();
     expect(screen.getByTestId(`console-trace-row-${ID}`)).toBeInTheDocument();
     expect(screen.getByTestId(`console-trace-row-${ID}-status`)).toHaveTextContent('ok');
     const convoLink = screen.getByTestId(`console-trace-row-${ID}-conversation-link`);
@@ -45,14 +60,14 @@ describe('<TraceRow /> standard render (Task 106)', () => {
   });
 
   it('omits the Jaeger link when the row has no trace id yet', () => {
-    render(<TraceRow row={{ ...baseRow, traceId: '' }} />);
+    renderRow({ row: { ...baseRow, traceId: '' } });
     expect(screen.queryByTestId(`console-trace-row-${ID}-jaeger-link`)).toBeNull();
   });
 });
 
 describe('<TraceRow /> deleted conversation (Task 108)', () => {
   it('appends "(deleted)" and keeps the link clickable', () => {
-    render(<TraceRow row={baseRow} conversationDeleted />);
+    renderRow({ conversationDeleted: true });
     const convoLink = screen.getByTestId(`console-trace-row-${ID}-conversation-link`);
     expect(convoLink).toHaveTextContent('(deleted)');
     expect(convoLink).toHaveAttribute('href', `/console/traces?conversationId=${CONV}`);
@@ -61,16 +76,28 @@ describe('<TraceRow /> deleted conversation (Task 108)', () => {
 
 describe('<TraceRow /> replay badge (Task 110)', () => {
   it('shows the replay badge only when kind is replay', () => {
-    const { rerender } = render(<TraceRow row={{ ...baseRow, kind: 'replay' }} />);
+    const { rerender } = render(
+      <table>
+        <tbody>
+          <TraceRow row={{ ...baseRow, kind: 'replay' }} />
+        </tbody>
+      </table>,
+    );
     expect(screen.getByTestId(`console-trace-row-${ID}-replay-badge`)).toBeInTheDocument();
-    rerender(<TraceRow row={{ ...baseRow, kind: 'chat' }} />);
+    rerender(
+      <table>
+        <tbody>
+          <TraceRow row={{ ...baseRow, kind: 'chat' }} />
+        </tbody>
+      </table>,
+    );
     expect(screen.queryByTestId(`console-trace-row-${ID}-replay-badge`)).toBeNull();
   });
 });
 
 describe('<TraceRow /> null tokens (Task 112)', () => {
   it('renders em-dash when both token counts are null', () => {
-    render(<TraceRow row={{ ...baseRow, promptTokens: null, completionTokens: null }} />);
+    renderRow({ row: { ...baseRow, promptTokens: null, completionTokens: null } });
     expect(screen.getByTestId(`console-trace-row-${ID}-prompt-tokens`)).toHaveTextContent('—');
     expect(screen.getByTestId(`console-trace-row-${ID}-completion-tokens`)).toHaveTextContent('—');
   });

@@ -15,7 +15,7 @@ export function PaneExpandControl({ label, onExpand }: PaneExpandControlProps) {
       data-testid={`console-replay-pane-expand-${label}`}
       aria-label={`Expand ${label} pane`}
       onClick={() => onExpand()}
-      className="text-[11px] text-chat-ink-2 underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+      className="text-[11px] text-con-dim underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
     >
       Expand
     </button>

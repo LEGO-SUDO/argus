@@ -55,10 +55,10 @@ export function ProviderModelPicker({
                 }}
                 className={`min-h-8 rounded-full border px-2.5 py-1 text-[11.5px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-acc ${
                   unavailable
-                    ? 'cursor-not-allowed border-chat-rule text-chat-ink-3'
+                    ? 'cursor-not-allowed border-con-rule text-con-dim-2'
                     : selected
-                      ? 'border-acc bg-acc-soft text-chat-ink'
-                      : 'border-chat-rule text-chat-ink-2 hover:bg-chat-hover'
+                      ? 'border-acc bg-acc-soft text-con-text'
+                      : 'border-con-rule text-con-dim hover:bg-con-hover'
                 }`}
               >
                 {p.provider}
@@ -80,7 +80,7 @@ export function ProviderModelPicker({
       </div>
 
       <div className="flex items-center gap-2">
-        <label htmlFor="console-replay-model" className="text-[12px] text-chat-ink-2">
+        <label htmlFor="console-replay-model" className="text-[12px] text-con-dim">
           Model
         </label>
         <select
@@ -89,7 +89,7 @@ export function ProviderModelPicker({
           aria-label="Replay model"
           value={model}
           onChange={(e) => onChange(provider, e.target.value)}
-          className="min-h-8 rounded-[6px] border border-chat-rule bg-chat-bg px-2 py-1 text-[12.5px] text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+          className="min-h-8 rounded-[6px] border border-con-rule bg-con-bg px-2 py-1 text-[12.5px] text-con-text focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
         >
           {models.length === 0 && <option value="">No models</option>}
           {models.map((m) => (

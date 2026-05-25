@@ -36,10 +36,8 @@ beforeEach(() => {
 });
 
 describe('<CostTab /> window sync (Task 144)', () => {
-  it('rehydrates the window toggle from the URL param', () => {
-    render(
-      <CostTab initialData={EMPTY} initialSearchParams={new URLSearchParams('window=7d')} />,
-    );
+  it('rehydrates the window toggle from the server-resolved initial window', () => {
+    render(<CostTab initialData={EMPTY} initialWindow="7d" />);
     expect(screen.getByTestId('console-time-window-7d')).toHaveAttribute('aria-pressed', 'true');
   });
 

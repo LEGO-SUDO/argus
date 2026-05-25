@@ -1,23 +1,25 @@
-// ConsoleHeader — console chrome: tab nav + LiveBadge + SampleDataButton +
+// ConsoleHeader — the .con-topbar: tab nav + LiveBadge + SampleDataButton +
 // ClearButton (LLD Task 178).
 //
-// The active tab carries aria-current="page". Generate-Samples and Clear both
-// trigger a router.refresh() so the active server-rendered tab re-fetches its
-// initial slice after the data set changes.
+// Reskinned to dev-tool dense design (REVIEW-BRIEF Finding 4). Uses
+// .con-topbar / .tabs / .tab / .right CSS classes from console.css. The active
+// tab gets an accent underline via .active. Existing aria-current="page",
+// data-testid, and refresh-on-action wiring are fully preserved.
 
 'use client';
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 
+import { Icon } from './Icon';
 import { LiveBadge } from './LiveBadge';
 import { SampleDataButton } from './SampleDataButton';
 import { ClearButton } from './ClearButton';
 
 const TABS = [
-  { key: 'traces', href: '/console/traces', label: 'Traces' },
-  { key: 'cost', href: '/console/cost', label: 'Cost' },
-  { key: 'replay', href: '/console/replay', label: 'Replay' },
+  { key: 'traces', href: '/console/traces', label: 'Traces', icon: 'list' as const },
+  { key: 'cost', href: '/console/cost', label: 'Cost', icon: 'dollar' as const },
+  { key: 'replay', href: '/console/replay', label: 'Replay', icon: 'replay' as const },
 ] as const;
 
 export function ConsoleHeader() {
@@ -28,9 +30,9 @@ export function ConsoleHeader() {
   return (
     <header
       data-testid="console-header"
-      className="flex flex-wrap items-center justify-between gap-3 border-b border-chat-rule bg-chat-panel px-4 py-3"
+      className="con-topbar"
     >
-      <nav aria-label="Console tabs" className="flex items-center gap-1">
+      <nav aria-label="Console tabs" className="tabs">
         {TABS.map((tab) => {
           const active = pathname?.startsWith(tab.href) ?? false;
           return (
@@ -39,17 +41,16 @@ export function ConsoleHeader() {
               href={tab.href}
               data-testid={`console-tab-${tab.key}`}
               aria-current={active ? 'page' : undefined}
-              className={`min-h-9 rounded-[6px] px-3 py-1.5 text-[13px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-acc ${
-                active ? 'bg-chat-ink text-chat-bg' : 'text-chat-ink-2 hover:bg-chat-hover'
-              }`}
+              className={`tab${active ? ' active' : ''}`}
             >
+              <Icon name={tab.icon} size={13} aria-hidden="true" />
               {tab.label}
             </Link>
           );
         })}
       </nav>
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="right">
         <LiveBadge />
         <SampleDataButton onGenerated={refresh} />
         <ClearButton onCleared={refresh} />

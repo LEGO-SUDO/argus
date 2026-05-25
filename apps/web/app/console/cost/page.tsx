@@ -54,6 +54,6 @@ export default async function CostPage({
   }
 
   return (
-    <CostTab initialData={data} initialWindow={window} initialSearchParams={params} />
+    <CostTab initialData={data} initialWindow={window} initialGroupBy={groupBy} />
   );
 }

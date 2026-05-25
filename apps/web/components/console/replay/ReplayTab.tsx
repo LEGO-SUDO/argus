@@ -1,9 +1,14 @@
 // ReplayTab — orchestrates the Replay tab (LLD Tasks 164-169 + Task 177 shell).
 //
-// Routes between the candidate picker (no source selected) and the detail view
-// (source selected), owns the target provider/model selection + diff view mode,
-// and drives the replay-run state machine (idle -> running -> success | failed)
-// off console-api.runReplay.
+// Reskinned to the dev-tool design language (REVIEW-BRIEF Finding 4).
+// When a source is selected: renders `.replay-shell` with a `.replay-picker`
+// toolbar (source chip, arrow, target-pick provider buttons, run-btn) and a
+// `.replay-cmp` two-column side-by-side comparison. When no source is
+// selected: renders the `.replay-picker` candidate dropdown (SourceMenu via
+// ReplayPicker).
+//
+// Run lifecycle: idle → running → success | failed. All data-testids and
+// accessibility attributes are preserved from the original implementation.
 
 'use client';
 
@@ -19,7 +24,9 @@ import type {
 import { runReplay } from '@/lib/console-api';
 import { ApiError } from '@/lib/auth-fetch';
 
+import { EmptyState } from '@/components/console/EmptyState';
 import { ReplayPicker } from './ReplayPicker';
+import { ReplayPickerBar } from './ReplayPickerBar';
 import { ReplayDetail, type ReplayRunState, type ReplaySource } from './ReplayDetail';
 import type { DiffViewMode } from './DiffToggle';
 import type { ReplayFailureKind } from './ReplayErrorMessage';
@@ -91,18 +98,51 @@ export function ReplayTab({ candidates, initialDetail, availability, window }: R
     }
   };
 
+  // No candidates at all → friendly empty state.
+  if (candidates.length === 0 && !source) {
+    return (
+      <div data-testid="console-replay-tab" className="replay-empty">
+        <h1 className="sr-only">Replay</h1>
+        <EmptyState scope="replay" />
+      </div>
+    );
+  }
+
+  // No source selected yet → show the candidate picker.
   if (!source) {
     return (
       <div data-testid="console-replay-tab">
         <h1 className="sr-only">Replay</h1>
-        <ReplayPicker candidates={candidates} window={window} onSelect={selectCandidate} />
+        <ReplayPickerBar
+          candidates={candidates}
+          window={window}
+          onSelect={selectCandidate}
+        />
       </div>
     );
   }
 
   return (
-    <div data-testid="console-replay-tab">
+    <div data-testid="console-replay-tab" className="replay-shell">
       <h1 className="sr-only">Replay</h1>
+      {/* Top picker bar: source chip, arrow, target-pick, run-btn */}
+      <ReplayPickerBar
+        source={source}
+        candidates={candidates}
+        window={window}
+        availability={availability}
+        provider={provider}
+        model={model}
+        onSelect={selectCandidate}
+        onProviderModelChange={(p, m) => {
+          setProvider(p);
+          setModel(m);
+        }}
+        onRun={handleRun}
+        onReset={resetToOriginal}
+        running={runState === 'running'}
+      />
+      {/* Side-by-side comparison panes */}
       <ReplayDetail
         source={source}
         availability={availability}

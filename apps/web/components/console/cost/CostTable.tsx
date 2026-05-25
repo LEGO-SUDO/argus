@@ -1,10 +1,8 @@
 // CostTable — grouped cost rows (LLD Tasks 136-143).
 //
-// Each group renders as a clickable row (a real <button> for a11y) with
-// prompt / completion / total columns formatted via the shared rule. A group
-// with unpriced rows mounts the UnpricedBadge; a mock-provider group is
-// visually distinct and carries a screen-reader annotation + data attribute.
-// Clicking a row invokes the drilldown handler with that group.
+// Reskinned to the dense dev-tool design language (REVIEW-BRIEF Finding 4).
+// Uses .brk-table with .ptag provider colour swatches. All data-testid, aria,
+// and behavioural contracts from the original are preserved 1:1.
 //
 // NOTE (contract reconciliation): CostGroupSchema exposes `unpricedCount` (a
 // number) but no per-group row total and no explicit mock flag — so "mock" is
@@ -31,64 +29,153 @@ function isMockGroup(group: CostGroup): boolean {
   return group.key === 'mock';
 }
 
+/** Derive a provider colour swatch key from a group key.
+ *  For provider-grouped rows the key IS the provider id; for model/conversation
+ *  grouping we can't know the provider, so we leave data-prov unset (no swatch). */
+function swatchProvider(group: CostGroup): string | undefined {
+  const known = ['openai', 'anthropic', 'gemini', 'mock'];
+  return known.includes(group.key) ? group.key : undefined;
+}
+
 export function CostTable({ groups, unpricedModels, onDrilldown }: CostTableProps) {
   return (
     <div data-testid="console-cost-table" role="table" aria-label="Cost by group">
-      <div
-        role="row"
-        className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-2 border-b border-chat-rule px-3 py-2 text-[11px] uppercase tracking-wide text-chat-ink-3"
-      >
-        <span role="columnheader">Group</span>
-        <span role="columnheader" className="text-right">Prompt</span>
-        <span role="columnheader" className="text-right">Completion</span>
-        <span role="columnheader" className="text-right">Total</span>
-      </div>
-      {groups.map((group) => {
-        const mock = isMockGroup(group);
-        return (
-          <div
-            key={group.key}
-            role="row"
-            data-testid={`console-cost-row-${group.key}`}
-            data-mock={mock ? 'true' : undefined}
-            className={`grid grid-cols-[2fr_1fr_1fr_1fr] items-center gap-2 border-b border-chat-rule px-3 py-2 text-[12.5px] ${
-              mock ? 'italic text-chat-ink-2' : 'text-chat-ink'
-            }`}
-          >
-            <span role="cell" className="flex items-center gap-2 truncate">
-              {/* Drilldown is the only interactive control in the row — keeps
-                  the UnpricedBadge button from nesting inside another button. */}
-              <button
-                type="button"
-                data-testid={`console-cost-row-${group.key}-select`}
-                aria-label={`Drill into ${group.label}`}
-                onClick={() => onDrilldown(group)}
-                className="truncate text-left underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+      <table className="brk-table">
+        <thead>
+          <tr>
+            <th role="columnheader">model</th>
+            <th role="columnheader" className="num">prompt $</th>
+            <th role="columnheader" className="num">completion $</th>
+            <th role="columnheader" className="num">total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => {
+            const mock = isMockGroup(group);
+            const prov = swatchProvider(group);
+            const unpriced = group.unpricedCount > 0;
+
+            return (
+              <tr
+                key={group.key}
+                role="row"
+                data-testid={`console-cost-row-${group.key}`}
+                data-mock={mock ? 'true' : undefined}
+                style={mock ? { fontStyle: 'italic', color: 'var(--con-dim)' } : undefined}
               >
-                {group.label}
-              </button>
-              {mock && (
-                <span data-testid={`console-cost-row-${group.key}-mock`} className="text-[11px] text-chat-ink-3">
-                  <span className="sr-only">(mock provider)</span>
-                  <span aria-hidden="true">mock</span>
-                </span>
-              )}
-              {group.unpricedCount > 0 && (
-                <UnpricedBadge count={group.unpricedCount} models={unpricedModels} />
-              )}
-            </span>
-            <span role="cell" className="text-right tabular-nums">
-              {formatMicroUsd(group.promptCostMicros)}
-            </span>
-            <span role="cell" className="text-right tabular-nums">
-              {formatMicroUsd(group.completionCostMicros)}
-            </span>
-            <span role="cell" className="text-right font-medium tabular-nums">
-              {formatMicroUsd(group.totalCostMicros)}
-            </span>
-          </div>
-        );
-      })}
+                {/* Label cell — drilldown button + ptag colour swatch */}
+                <td role="cell">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    {prov !== undefined ? (
+                      <span
+                        className="ptag"
+                        data-prov={prov}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <span className="swatch" />
+                        <button
+                          type="button"
+                          data-testid={`console-cost-row-${group.key}-select`}
+                          aria-label={`Drill into ${group.label}`}
+                          onClick={() => onDrilldown(group)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            cursor: 'pointer',
+                            color: 'inherit',
+                            fontFamily: 'inherit',
+                            fontSize: 'inherit',
+                            textDecoration: 'underline',
+                            textDecorationStyle: 'dashed',
+                            textUnderlineOffset: 2,
+                          }}
+                        >
+                          {group.label}
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`console-cost-row-${group.key}-select`}
+                        aria-label={`Drill into ${group.label}`}
+                        onClick={() => onDrilldown(group)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          cursor: 'pointer',
+                          color: 'inherit',
+                          fontFamily: 'inherit',
+                          fontSize: 'inherit',
+                          textDecoration: 'underline',
+                          textDecorationStyle: 'dashed',
+                          textUnderlineOffset: 2,
+                        }}
+                      >
+                        {group.label}
+                      </button>
+                    )}
+                    {mock && (
+                      <span
+                        data-testid={`console-cost-row-${group.key}-mock`}
+                        style={{ fontSize: 10.5, color: 'var(--con-dim-2)' }}
+                      >
+                        <span className="sr-only">(mock provider)</span>
+                        <span aria-hidden="true">mock</span>
+                      </span>
+                    )}
+                    {unpriced && (
+                      <UnpricedBadge count={group.unpricedCount} models={unpricedModels} />
+                    )}
+                  </span>
+                </td>
+
+                <td role="cell" className="num">
+                  {unpriced && group.promptCostMicros === 0 ? (
+                    <span
+                      className="dim"
+                      title="no pricing entry; contributes zero"
+                    >
+                      —
+                    </span>
+                  ) : (
+                    formatMicroUsd(group.promptCostMicros)
+                  )}
+                </td>
+                <td role="cell" className="num">
+                  {unpriced && group.completionCostMicros === 0 ? (
+                    <span className="dim">—</span>
+                  ) : (
+                    formatMicroUsd(group.completionCostMicros)
+                  )}
+                </td>
+                <td role="cell" className="num">
+                  <b style={{ fontWeight: 600 }}>
+                    {unpriced && group.totalCostMicros === 0 ? (
+                      <span className="dim">—</span>
+                    ) : (
+                      formatMicroUsd(group.totalCostMicros)
+                    )}
+                  </b>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {unpricedModels.length > 0 && (
+        <div
+          style={{
+            padding: '8px 14px',
+            color: 'var(--con-dim-2)',
+            fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+            fontSize: 10.5,
+          }}
+        >
+          {"'—' = no pricing entry; contributes zero to totals."}
+        </div>
+      )}
     </div>
   );
 }

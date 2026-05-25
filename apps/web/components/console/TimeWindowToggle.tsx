@@ -1,8 +1,8 @@
 // TimeWindowToggle — controlled 24h / 7d / all segmented control.
 //
-// LLD frontend-web Phase 6 (Tasks 72-73). Pure, controlled: the parent tab
-// owns the value; clicking an option emits it. The selected option announces
-// itself via `aria-pressed`.
+// Reskinned to dev-tool dense design (REVIEW-BRIEF Finding 4). Uses
+// .window-switch from console.css. All existing data-testids, aria-pressed,
+// props, and behavior are fully preserved.
 
 'use client';
 
@@ -22,7 +22,7 @@ export function TimeWindowToggle({ value, onChange }: TimeWindowToggleProps) {
       data-testid="console-time-window-toggle"
       role="group"
       aria-label="Time window"
-      className="inline-flex items-center rounded-[6px] border border-chat-rule bg-chat-panel p-0.5"
+      className="window-switch"
     >
       {OPTIONS.map((option) => {
         const selected = option === value;
@@ -34,9 +34,7 @@ export function TimeWindowToggle({ value, onChange }: TimeWindowToggleProps) {
             aria-pressed={selected}
             aria-label={`Show ${LABELS[option]}`}
             onClick={() => onChange(option)}
-            className={`min-h-8 rounded-[5px] px-2.5 py-1 text-[12.5px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-acc ${
-              selected ? 'bg-chat-ink text-chat-bg' : 'text-chat-ink-2 hover:bg-chat-hover'
-            }`}
+            className={selected ? 'active' : ''}
           >
             {LABELS[option]}
           </button>

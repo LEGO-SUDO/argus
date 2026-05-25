@@ -1,10 +1,8 @@
 // SampleDataButton — "Generate sample inferences" control.
 //
-// LLD frontend-web Phase 6 (Tasks 74-77). Triggers POST /api/console/samples/
-// generate, surfacing an interim "Generating…" then a count-aware "Generated N
-// inferences" status inside an aria-live region. A failure surfaces inline and
-// re-enables the button for retry. On success, `onGenerated(count)` lets the
-// parent trigger a refetch.
+// Reskinned to dev-tool dense design (REVIEW-BRIEF Finding 4). Uses
+// .filter-chip styling to fit the console topbar. All existing data-testids,
+// aria-live, props, state machine, and behavior are fully preserved.
 
 'use client';
 
@@ -44,23 +42,28 @@ export function SampleDataButton({ count, onGenerated }: SampleDataButtonProps) 
   }
 
   return (
-    <div className="inline-flex items-center gap-2">
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
       <button
         type="button"
         data-testid="console-sample-data-button"
         aria-label="Generate sample inferences"
         disabled={generating}
         onClick={handleClick}
-        className="inline-flex min-h-9 items-center gap-1.5 rounded-[6px] border border-chat-rule px-3 py-[7px] text-[12.5px] font-medium text-chat-ink hover:bg-chat-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-acc disabled:cursor-not-allowed disabled:opacity-50"
+        className="filter-chip"
+        style={{ opacity: generating ? 0.5 : undefined, cursor: generating ? 'not-allowed' : undefined }}
       >
-        {generating ? 'Generating…' : 'Generate sample inferences'}
+        {generating ? 'Generating…' : 'Generate samples'}
       </button>
 
       <span
         data-testid="console-sample-data-status"
         role="status"
         aria-live="polite"
-        className="text-[12px] text-chat-ink-2"
+        style={{
+          fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+          fontSize: 11,
+          color: 'var(--con-dim)',
+        }}
       >
         {status.kind === 'generating' && 'Generating…'}
         {status.kind === 'done' && `Generated ${status.count} inferences`}
@@ -70,7 +73,11 @@ export function SampleDataButton({ count, onGenerated }: SampleDataButtonProps) 
         <span
           data-testid="console-sample-data-error"
           role="alert"
-          className="text-[12px] text-err"
+          style={{
+            fontFamily: 'var(--font-geist-mono), ui-monospace, monospace',
+            fontSize: 11,
+            color: 'var(--err)',
+          }}
         >
           {status.message}
         </span>
