@@ -16,10 +16,12 @@
 
 'use client';
 
+import { useEffect, useState } from 'react';
+
 import type {
   InferenceStatus,
   ProviderAvailabilityResponse,
-  ReplayRunResponse,
+  ReplayDetail as ReplayDetailDto,
 } from '@argus/contracts';
 
 import { DiffToggle, type DiffViewMode } from './DiffToggle';
@@ -52,7 +54,7 @@ export type ReplayDetailProps = {
   onRun: () => void;
   onReset: () => void;
   runState: ReplayRunState;
-  result: ReplayRunResponse | null;
+  result: ReplayDetailDto | null;
   mode: DiffViewMode;
   onModeChange: (mode: DiffViewMode) => void;
   errorKind?: ReplayFailureKind;
@@ -79,7 +81,7 @@ function fmtUSD(micros: number | null | undefined): string {
   return `$${usd.toFixed(4)}`;
 }
 
-function diffChanges(result: ReplayRunResponse | null) {
+function diffChanges(result: ReplayDetailDto | null) {
   if (result?.diff && 'changes' in result.diff) return result.diff.changes;
   return [];
 }
@@ -104,21 +106,13 @@ export function ReplayDetail({
 }: ReplayDetailProps) {
   const tooLarge = result?.diff != null && 'tooLarge' in result.diff;
 
-  // Replay result metrics — ReplayRunResponse does not expose latency/tokens
-  // directly; the diff is the core payload. We surface what we have.
-  // latencyMs / token deltas are shown if present in the result extension.
-  const replayLatencyMs = (result as Record<string, unknown> | null)?.['latencyMs'] as
-    | number
-    | undefined;
-  const replayPromptTokens = (result as Record<string, unknown> | null)?.['promptTokens'] as
-    | number
-    | undefined;
-  const replayCompletionTokens = (result as Record<string, unknown> | null)?.[
-    'completionTokens'
-  ] as number | undefined;
-  const replayCostMicros = (result as Record<string, unknown> | null)?.['totalCostMicros'] as
-    | number
-    | undefined;
+  // Replay metrics come straight off the polled ReplayDetail (the inference
+  // row, enriched by the projection consumer). They're null until projection
+  // lands, so deltas only render once both sides have numbers.
+  const replayLatencyMs = result?.latencyMs ?? undefined;
+  const replayPromptTokens = result?.promptTokens ?? undefined;
+  const replayCompletionTokens = result?.completionTokens ?? undefined;
+  const replayCostMicros = result?.totalCostMicros ?? undefined;
 
   const latDelta =
     replayLatencyMs != null && source.latencyMs != null
@@ -129,11 +123,10 @@ export function ReplayDetail({
       ? replayCostMicros - source.totalCostMicros
       : null;
 
-  // Replay provider·model from result extension, fall back to result fields.
-  const replayProvider = (result as Record<string, unknown> | null)?.['provider'] as
-    | string
-    | undefined;
-  const replayModel = (result as Record<string, unknown> | null)?.['model'] as string | undefined;
+  // Replay provider·model from the polled detail (the actual provider/model the
+  // replay ran against), falling back to the selected target.
+  const replayProvider = result?.provider ?? undefined;
+  const replayModel = result?.model ?? undefined;
 
   return (
     <div data-testid="console-replay-detail" className="replay-cmp">
@@ -185,41 +178,12 @@ export function ReplayDetail({
 
         {/* Output area — input box then word-diff (original side = deletions) */}
         <div className="output" data-testid="console-replay-output-original">
-          <div
-            style={{
-              color: 'var(--con-dim-2)',
-              fontSize: 10.5,
-              marginBottom: 8,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}
-          >
-            input
-          </div>
-          <div
-            data-testid="console-replay-input-preview"
-            style={{
-              color: 'var(--con-dim)',
-              marginBottom: 14,
-              padding: '8px 10px',
-              background: 'oklch(0.21 0.008 270)',
-              borderRadius: 4,
-              border: '1px solid var(--con-rule)',
-            }}
-          >
-            {source.inputPreview ?? '—'}
-          </div>
-          <div
-            style={{
-              color: 'var(--con-dim-2)',
-              fontSize: 10.5,
-              marginBottom: 8,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}
-          >
-            output
-          </div>
+          <InputPreviewBox
+            value={source.inputPreview}
+            testId="console-replay-input-preview"
+          />
+          <OutputLabel />
+
           {/* Original side of the diff: show deletions (text in original not in replay) */}
           {runState === 'success' && result && !tooLarge ? (
             <OriginalDiff changes={diffChanges(result)} />
@@ -331,19 +295,16 @@ export function ReplayDetail({
           </div>
         </div>
 
-        {/* Output area — replay insertions + pending/error states */}
+        {/* Output area — input box (mirrors the original column so both OUTPUT
+         *  sections start at the same vertical level) then replay insertions +
+         *  pending/error states. The replay re-runs the SAME input, so the box
+         *  shows identical content to the original side. */}
         <div className="output" data-testid="console-replay-output-replay">
-          <div
-            style={{
-              color: 'var(--con-dim-2)',
-              fontSize: 10.5,
-              marginBottom: 8,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}
-          >
-            output{runState === 'running' && ' · streaming'}
-          </div>
+          <InputPreviewBox
+            value={source.inputPreview}
+            testId="console-replay-input-preview-replay"
+          />
+          <OutputLabel suffix={runState === 'running' ? ' · streaming' : ''} />
 
           {runState === 'idle' && (
             <div
@@ -356,13 +317,7 @@ export function ReplayDetail({
           )}
 
           {runState === 'running' && (
-            <div
-              className="pending"
-              data-testid="console-replay-running"
-              aria-live="polite"
-            >
-              Replaying…
-            </div>
+            <ReplayProgress provider={replayProvider ?? _provider} model={replayModel ?? _model} />
           )}
 
           {runState === 'success' && result && !tooLarge && (
@@ -421,10 +376,144 @@ export function ReplayDetail({
 }
 
 // --------------------------------------------------------------------------
+// ReplayProgress — the running-state indicator. A replay re-runs the full
+// conversation against the chosen provider, so it can take many seconds (big
+// contexts, slow providers). A bare "Replaying…" reads as "stuck", so we show
+// a live elapsed timer + stage-based reassurance + a skeleton so the wait is
+// legible. Mounts only while running; the timer cleans up on unmount.
+// --------------------------------------------------------------------------
+function ReplayProgress({ provider, model }: { provider: string; model: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Stage copy escalates so a long wait still feels like progress, not a hang.
+  const stage =
+    elapsed < 8
+      ? `Sending the original input to ${provider} · ${model}…`
+      : elapsed < 25
+        ? 'Streaming the response — replaying the full conversation can take a bit.'
+        : 'Still working — finalizing the response. Large conversations take longer.';
+
+  return (
+    <div
+      className="pending"
+      data-testid="console-replay-running"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <svg
+          width={12}
+          height={12}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          style={{ animation: 'spin 0.9s linear infinite', color: 'var(--info)' }}
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r="8"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeDasharray="14 40"
+          />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </svg>
+        <span style={{ color: 'var(--con-text)' }}>
+          Replaying…{' '}
+          <span
+            data-testid="console-replay-elapsed"
+            style={{ fontFamily: 'var(--font-geist-mono), ui-monospace, monospace' }}
+          >
+            {elapsed}s
+          </span>
+        </span>
+      </div>
+      <div style={{ color: 'var(--con-dim)', fontSize: 12, marginTop: 6 }}>{stage}</div>
+      {/* Skeleton lines hint that output is on its way. */}
+      <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {[92, 78, 85].map((w, i) => (
+          <div
+            key={i}
+            className="animate-pulse"
+            style={{
+              height: 9,
+              width: `${w}%`,
+              borderRadius: 3,
+              background: 'var(--con-rule-2)',
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
 // Inline diff sub-renderers using the CSS `.output del` / `.output ins` rules
 // --------------------------------------------------------------------------
 
 import type { DiffChange } from '@argus/contracts';
+
+/** Uppercase section label ("output", optionally with a " · streaming" suffix).
+ *  Shared by both columns so they stay pixel-identical. */
+function OutputLabel({ suffix = '' }: { suffix?: string }) {
+  return (
+    <div
+      style={{
+        color: 'var(--con-dim-2)',
+        fontSize: 10.5,
+        marginBottom: 8,
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+      }}
+    >
+      output{suffix}
+    </div>
+  );
+}
+
+/** The "input" label + preview box. Rendered in BOTH columns so the OUTPUT
+ *  sections start at the same vertical level — the replay ran on the same
+ *  input, so the content matches the original side exactly. */
+function InputPreviewBox({ value, testId }: { value: string | null; testId: string }) {
+  return (
+    <>
+      <div
+        style={{
+          color: 'var(--con-dim-2)',
+          fontSize: 10.5,
+          marginBottom: 8,
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        input
+      </div>
+      <div
+        data-testid={testId}
+        style={{
+          color: 'var(--con-dim)',
+          marginBottom: 14,
+          padding: '8px 10px',
+          background: 'oklch(0.21 0.008 270)',
+          borderRadius: 4,
+          border: '1px solid var(--con-rule)',
+        }}
+      >
+        {value ?? '—'}
+      </div>
+    </>
+  );
+}
 
 /** Original side: show text that is being removed (deletions highlighted). */
 function OriginalDiff({ changes }: { changes: DiffChange[] }) {

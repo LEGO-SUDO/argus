@@ -80,4 +80,123 @@ describe('ReplayRepository.detail', () => {
     const otherId = seedInference(prisma, randomUUID(), { status: 'ok', startedAt: NOW });
     expect(await repo.detail({ userId, id: otherId })).toBeNull();
   });
+
+  it('falls back to the message content for outputPreview when the column is null', async () => {
+    const { repo, prisma, userId } = build();
+    const conv = randomUUID();
+    const msgId = randomUUID();
+    prisma.messages.push({
+      id: msgId,
+      conversationId: conv,
+      userId,
+      role: 'assistant',
+      content: 'the full assistant answer',
+      status: 'complete',
+      createdAt: NOW,
+      completedAt: NOW,
+    });
+    const id = seedInference(prisma, userId, {
+      conversationId: conv,
+      messageId: msgId,
+      status: 'ok',
+      outputPreview: null, // projection never populated it
+      startedAt: NOW,
+    });
+    const d = (await repo.detail({ userId, id }))!;
+    expect(d.outputPreview).toBe('the full assistant answer');
+  });
+
+  it('keeps the inference outputPreview when it is already set', async () => {
+    const { repo, prisma, userId } = build();
+    const id = seedInference(prisma, userId, {
+      status: 'ok',
+      outputPreview: 'projection preview',
+      startedAt: NOW,
+    });
+    expect((await repo.detail({ userId, id }))!.outputPreview).toBe('projection preview');
+  });
+});
+
+describe('ReplayRepository.detail — replay diff', () => {
+  function seedMessage(
+    prisma: InMemoryPrisma,
+    userId: string,
+    conversationId: string,
+    id: string,
+    content: string,
+    status: 'complete' | 'streaming' = 'complete',
+  ): void {
+    prisma.messages.push({
+      id,
+      conversationId,
+      userId,
+      role: 'assistant',
+      content,
+      status,
+      createdAt: NOW,
+      completedAt: status === 'complete' ? NOW : null,
+    });
+  }
+
+  it('computes a word-level diff for a terminal replay row vs its source output', async () => {
+    const { repo, prisma, userId } = build();
+    const conv = randomUUID();
+    seedConversation(prisma, userId, conv, 'Conv');
+    const sourceMsgId = randomUUID();
+    seedMessage(prisma, userId, conv, sourceMsgId, 'the quick brown fox');
+    const sourceId = seedInference(prisma, userId, {
+      conversationId: conv,
+      messageId: sourceMsgId,
+      status: 'ok',
+      outputPreview: 'the quick brown fox',
+      startedAt: NOW,
+    });
+    const replayMsgId = randomUUID();
+    seedMessage(prisma, userId, conv, replayMsgId, 'the quick red fox');
+    const replayId = seedInference(prisma, userId, {
+      conversationId: conv,
+      messageId: replayMsgId,
+      kind: 'replay',
+      status: 'ok',
+      replayOfInferenceId: sourceId,
+      startedAt: NOW,
+    });
+
+    const d = (await repo.detail({ userId, id: replayId }))!;
+    expect(d.diff).not.toBeNull();
+    const diff = d.diff as { changes: Array<{ value: string; added?: boolean; removed?: boolean }> };
+    expect('changes' in diff).toBe(true);
+    expect(diff.changes.some((c) => c.removed && c.value.includes('brown'))).toBe(true);
+    expect(diff.changes.some((c) => c.added && c.value.includes('red'))).toBe(true);
+  });
+
+  it('returns a null diff for a plain chat (source) row', async () => {
+    const { repo, prisma, userId } = build();
+    const id = seedInference(prisma, userId, { status: 'ok', startedAt: NOW });
+    expect((await repo.detail({ userId, id }))!.diff).toBeNull();
+  });
+
+  it('returns a null diff while the replay turn is still streaming', async () => {
+    const { repo, prisma, userId } = build();
+    const conv = randomUUID();
+    const sourceMsgId = randomUUID();
+    seedMessage(prisma, userId, conv, sourceMsgId, 'original answer');
+    const sourceId = seedInference(prisma, userId, {
+      conversationId: conv,
+      messageId: sourceMsgId,
+      status: 'ok',
+      startedAt: NOW,
+    });
+    const replayMsgId = randomUUID();
+    seedMessage(prisma, userId, conv, replayMsgId, '', 'streaming');
+    const replayId = seedInference(prisma, userId, {
+      conversationId: conv,
+      messageId: replayMsgId,
+      kind: 'replay',
+      status: 'streaming',
+      replayOfInferenceId: sourceId,
+      startedAt: NOW,
+    });
+    expect((await repo.detail({ userId, id: replayId }))!.diff).toBeNull();
+  });
 });

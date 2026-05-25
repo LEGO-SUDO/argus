@@ -193,6 +193,21 @@ export const ReplayCandidatesResponseSchema = z.object({
 });
 export type ReplayCandidatesResponse = z.infer<typeof ReplayCandidatesResponseSchema>;
 
+// Word-level diff payload (jsdiff change list) or a sentinel when either side
+// exceeds the replay output-size cap.
+export const DiffChangeSchema = z.object({
+  value: z.string(),
+  added: z.boolean().optional(),
+  removed: z.boolean().optional(),
+});
+export type DiffChange = z.infer<typeof DiffChangeSchema>;
+
+export const DiffResultSchema = z.union([
+  z.object({ changes: z.array(DiffChangeSchema) }),
+  z.object({ tooLarge: z.literal(true) }),
+]);
+export type DiffResult = z.infer<typeof DiffResultSchema>;
+
 export const ReplayDetailSchema = z.object({
   id: z.string().uuid(),
   // OTel trace id (Jaeger deep link), mirroring TraceRow. Empty string when
@@ -216,6 +231,11 @@ export const ReplayDetailSchema = z.object({
   outputPreview: z.string().nullable(),
   errorCode: z.string().nullable(),
   eligibility: ReplayEligibilitySchema,
+  // Word-level diff of this row's output vs its replay SOURCE's output.
+  // Non-null only for a terminal `kind='replay'` row whose source has output
+  // (the replay comparison the UI renders); null for sources, in-flight
+  // replays, or when either output is missing.
+  diff: DiffResultSchema.nullable(),
 });
 export type ReplayDetail = z.infer<typeof ReplayDetailSchema>;
 
@@ -225,21 +245,6 @@ export const ReplayRunRequestSchema = z.object({
   model: z.string(),
 });
 export type ReplayRunRequest = z.infer<typeof ReplayRunRequestSchema>;
-
-// Word-level diff payload (jsdiff change list) or a sentinel when either side
-// exceeds the replay output-size cap.
-export const DiffChangeSchema = z.object({
-  value: z.string(),
-  added: z.boolean().optional(),
-  removed: z.boolean().optional(),
-});
-export type DiffChange = z.infer<typeof DiffChangeSchema>;
-
-export const DiffResultSchema = z.union([
-  z.object({ changes: z.array(DiffChangeSchema) }),
-  z.object({ tooLarge: z.literal(true) }),
-]);
-export type DiffResult = z.infer<typeof DiffResultSchema>;
 
 export const ReplayRunResponseSchema = z.object({
   // New replay assistant message id (the gateway-minted message).

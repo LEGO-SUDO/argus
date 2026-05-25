@@ -138,7 +138,7 @@ describe('replay fetchers (Task 38)', () => {
   });
 
   it('fetchReplayDetail GETs /api/console/replay/:id', async () => {
-    const detail = { ...TRACE_ROW, eligibility: 'eligible' };
+    const detail = { ...TRACE_ROW, eligibility: 'eligible', diff: null };
     mockAuthFetch.mockResolvedValue(detail);
     const result = await api.fetchReplayDetail(UUID);
     expect(lastAuthPath()).toBe(`/api/console/replay/${UUID}`);
