@@ -66,10 +66,10 @@ describe('ClassifierAdapter', () => {
     expect(row.status).toBe('ok');
     expect(result.inferenceId).toBe(row.id);
 
-    // Called with provider=openai, model=gpt-4o-mini, and a classification prompt.
+    // Pinned to openai/gpt-4o-mini (the router honors a pin, not the ignored
+    // provider/model hint), and sent a classification prompt.
     expect(captured).toHaveLength(1);
-    expect(captured[0]!.provider).toBe('openai');
-    expect(captured[0]!.model).toBe('gpt-4o-mini');
+    expect(captured[0]!.pin).toEqual({ provider: 'openai', model: 'gpt-4o-mini' });
     const systemMsg = captured[0]!.messages.find((m) => m.role === 'system');
     expect(systemMsg?.content.toLowerCase()).toContain('coding');
   });
