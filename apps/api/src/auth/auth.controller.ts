@@ -145,4 +145,22 @@ export class AuthController {
     }
     res.setHeader('Set-Cookie', buildClearedSessionCookie({ secure: isProd() }));
   }
+
+  // Hands the authenticated browser its session token so it can authenticate
+  // the chat WebSocket via `?token=`. The WS connects directly to the api
+  // (cross-origin from the web), where the browser can't send the session
+  // cookie — so we surface the token over this cookie-authenticated endpoint
+  // (reached same-origin via the web's /api proxy).
+  @Get('ws-ticket')
+  @UseGuards(SessionGuard)
+  @HttpCode(HttpStatus.OK)
+  wsTicket(@Req() req: Request & { cookies?: Record<string, string> }): { token: string } {
+    const token = req.cookies?.[SESSION_COOKIE_NAME];
+    if (!token) {
+      throw new UnauthorizedException({
+        error: { code: 'invalid_credentials', message: 'Invalid or expired session' },
+      });
+    }
+    return { token };
+  }
 }
