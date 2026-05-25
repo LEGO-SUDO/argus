@@ -31,8 +31,13 @@ data:
   LIVE_EVENTS_TOPIC: "live-events"
   LIVE_EVENTS_CONSUMER_GROUP: "api-live-fanout"
 
-  # Provider model overrides (optional; blank = SDK defaults).
-  OPENAI_MODEL: ""
-  ANTHROPIC_MODEL: ""
-  GOOGLE_MODEL: ""
-  PROVIDER_ORDER: ""
+  # Provider failover order. Gemini is excluded — its SDK adapter targets a
+  # non-existent Gemini API shape (endpoint /v1beta/interactions + default
+  # model gemini-3-flash-preview), so it 404s; needs an adapter fix. openai +
+  # anthropic are verified working against live keys.
+  PROVIDER_ORDER: "openai,anthropic"
+  # WARNING: do NOT add OPENAI_MODEL/ANTHROPIC_MODEL/GOOGLE_MODEL set to "".
+  # The SDK resolves the model via `?? process.env.X ?? DEFAULT_MODEL`, and an
+  # empty string is NOT nullish — so "" gets sent as the model id and the
+  # provider rejects it (provider_error). Omit the key to use the SDK default,
+  # or set a real model id (e.g. OPENAI_MODEL: "gpt-4o").
