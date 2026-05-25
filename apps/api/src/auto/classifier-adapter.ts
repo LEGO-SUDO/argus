@@ -77,8 +77,13 @@ export class ClassifierAdapter {
       turnIndex: input.turnIndex ?? 0,
       userId: input.userId,
       messageId: classifierMessageId,
-      provider: CLASSIFIER_PROVIDER,
-      model: CLASSIFIER_MODEL,
+      // Pin (not the ignored provider/model hint) so the classify call actually
+      // runs on the classifier model — same fix as REVIEW-BRIEF Finding 5 R1 for
+      // Replay. Safe here: AutoRouterService only invokes the classifier when
+      // openAiKeyConfigured is true (CLASSIFIER_PROVIDER='openai'), and a pinned
+      // failure throws → route() degrades to the keyword heuristic (never
+      // provider failover, by design).
+      pin: { provider: CLASSIFIER_PROVIDER, model: CLASSIFIER_MODEL },
     });
 
     for await (const chunk of stream) {
