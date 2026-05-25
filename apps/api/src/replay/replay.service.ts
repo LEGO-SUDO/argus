@@ -7,7 +7,7 @@
 // workspace); (5) drive a StreamOrchestrator against the target provider,
 // registered in the OrchestratorRegistry so Clear can cancel it. Returns the
 // new ids immediately; the diff is computed later (the run streams async).
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ReplayRunResponse } from '@argus/contracts';
 import { PrismaService } from '../common/prisma.service';
 import { ChatService } from '../chat/chat.service';
@@ -41,6 +41,11 @@ export interface ReplayRunInput {
   model: string;
 }
 
+/** Hard ceiling on a single replay run. Past this the orchestrator is canceled
+ *  so a stalled provider stream can't strand the turn in `streaming` forever.
+ *  Comfortably above a normal replay (seconds) but bounded for the UI poll. */
+const REPLAY_MAX_DURATION_MS = 45_000;
+
 interface SourceRow {
   id: string;
   messageId: string;
@@ -58,6 +63,8 @@ interface MessageRow {
 
 @Injectable()
 export class ReplayService {
+  private readonly logger = new Logger(ReplayService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly chat: ChatService,
@@ -154,17 +161,48 @@ export class ReplayService {
       cancel: () => orchestrator.cancel(),
     };
     this.registry.register(input.userId, handle);
+    // Safety timeout: a replay stream that stalls (provider hang, etc.) would
+    // otherwise leave the message stuck in `streaming` forever — the console
+    // polls the detail for the diff and would never resolve (it would just
+    // "keep loading"). Cancel the orchestrator after a bound so the turn
+    // finalizes (`canceled`), which makes the diff computable and lets the UI
+    // surface a result instead of spinning. Cleared on normal completion;
+    // `cancel()` is idempotent (no-op once a terminal has been reached). The
+    // timer is unref'd so it never keeps the process (or a test) alive.
+    const timeout: ReturnType<typeof setTimeout> = setTimeout(() => {
+      this.logger.warn(
+        `replay.run.timeout messageId=${assistantMessageId} provider=${input.provider} model=${input.model} — canceling stalled stream`,
+      );
+      void orchestrator.cancel();
+    }, REPLAY_MAX_DURATION_MS);
+    (timeout as { unref?: () => void }).unref?.();
+    this.logger.debug(
+      `replay.run.start messageId=${assistantMessageId} inferenceId=${newInf?.id} provider=${input.provider} model=${input.model} historyMsgs=${sdkMessages.length}`,
+    );
     void orchestrator
       .runStream()
-      .catch((err) =>
+      .then(() =>
+        this.logger.debug(`replay.run.done messageId=${assistantMessageId}`),
+      )
+      .catch((err) => {
+        // VISIBLE log in addition to Sentry — captureApiError is a no-op
+        // without SENTRY_DSN, which silently hid replay failures in local dev.
+        this.logger.error(
+          `replay.run.error messageId=${assistantMessageId}: ${
+            err instanceof Error ? err.stack ?? err.message : String(err)
+          }`,
+        );
         captureApiError({
           err,
           feature: 'replay',
           layer: 'service',
           extra: { stage: 'runStream', messageId: assistantMessageId },
-        }),
-      )
-      .finally(() => this.registry.deregister(input.userId, assistantMessageId));
+        });
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        this.registry.deregister(input.userId, assistantMessageId);
+      });
 
     return {
       messageId: assistantMessageId,
