@@ -877,6 +877,81 @@ describe('MessageStream — does not construct real WsClient during render', () 
   });
 });
 
+// Bug fix: a starter card used to call `onSend` directly, bypassing the
+// composer and therefore the chosen pin — so a starter always sent Auto. The
+// fix routes the starter submit THROUGH the composer (imperative handle), so
+// the picked provider/model rides the send frame.
+describe('MessageStream — starter card carries the selected pin', () => {
+  const PIN_CATALOG = {
+    providers: [
+      {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        promptPerMillion: 0.15,
+        completionPerMillion: 0.6,
+        contextWindow: 128000,
+      },
+    ],
+  };
+
+  it('sends the pre-mint pin on the frame when a starter is clicked', async () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={null}
+        initialMessages={[]}
+        wsClient={stub.client}
+        providerCatalog={PIN_CATALOG}
+      />,
+    );
+    // Pick a model first (held locally pre-mint), then click a starter card.
+    await userEvent.click(screen.getByTestId('provider-picker-trigger'));
+    await userEvent.click(screen.getByRole('option', { name: /gpt-4o-mini/i }));
+    await userEvent.click(
+      screen.getByTestId('chat-empty-hero-starter-help-me-draft-a-reply'),
+    );
+
+    const sendFrame = stub.sent.find((f) => f.type === 'send');
+    expect(sendFrame).toMatchObject({
+      type: 'send',
+      conversationId: null,
+      pinnedProvider: 'openai',
+      pinnedModel: 'gpt-4o-mini',
+    });
+    // And the starter text rode along.
+    expect((sendFrame as { content?: string }).content).toMatch(/draft a reply/i);
+  });
+});
+
+// Bug fix: a canceled turn had no way to continue. Resume issues a fresh
+// continuation turn (true mid-stream resume isn't built).
+describe('MessageStream — Resume on a canceled turn', () => {
+  it('sends a continuation turn for the existing conversation', async () => {
+    const stub = makeStubClient();
+    render(
+      <MessageStream
+        conversationId={CONV_ID}
+        initialMessages={[
+          { id: 'u-1', role: 'user', content: 'write a poem', status: 'complete' },
+          {
+            id: MSG_ID,
+            role: 'assistant',
+            content: 'Roses are',
+            status: 'canceled',
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+          },
+        ]}
+        wsClient={stub.client}
+      />,
+    );
+    await userEvent.click(screen.getByTestId(`message-resume-${MSG_ID}`));
+    const sendFrame = stub.sent.find((f) => f.type === 'send');
+    expect(sendFrame).toMatchObject({ type: 'send', conversationId: CONV_ID });
+    expect((sendFrame as { content?: string }).content).toMatch(/continue/i);
+  });
+});
+
 // Silence unused-var warning for MSG_ID_2 which is reserved for future
 // multi-turn tests.
 void MSG_ID_2;

@@ -20,7 +20,7 @@
 // transition from streaming → terminal is seamless.
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import type { Message } from '@/lib/message-stream-reducer';
 import { MessageContent } from './MessageContent';
 
@@ -28,9 +28,21 @@ type MessageListProps = {
   messages: Message[];
   /** Called when the user clicks Retry on a failed message. */
   onRetry: (failedMessageId: string) => void;
+  /** Called when the user clicks Resume on a canceled message. Optional so
+   *  legacy call sites (and tests) that don't wire it keep working. */
+  onResume?: (messageId: string) => void;
+  /** Active conversation id — needed to deep-link the per-message "view trace"
+   *  action into the operator console. Null/undefined on a brand-new
+   *  conversation (no persisted trace yet), which disables the action. */
+  conversationId?: string | null;
 };
 
-export function MessageList({ messages, onRetry }: MessageListProps) {
+export function MessageList({
+  messages,
+  onRetry,
+  onResume,
+  conversationId = null,
+}: MessageListProps) {
   return (
     <ol
       data-testid="message-list"
@@ -44,7 +56,12 @@ export function MessageList({ messages, onRetry }: MessageListProps) {
           data-status={m.status}
           className="group flex flex-col gap-1.5"
         >
-          <MessageRow message={m} onRetry={onRetry} />
+          <MessageRow
+            message={m}
+            onRetry={onRetry}
+            onResume={onResume}
+            conversationId={conversationId}
+          />
         </li>
       ))}
     </ol>
@@ -54,9 +71,11 @@ export function MessageList({ messages, onRetry }: MessageListProps) {
 type MessageRowProps = {
   message: Message;
   onRetry: (failedMessageId: string) => void;
+  onResume?: (messageId: string) => void;
+  conversationId?: string | null;
 };
 
-function MessageRow({ message, onRetry }: MessageRowProps) {
+function MessageRow({ message, onRetry, onResume, conversationId }: MessageRowProps) {
   if (message.role === 'user') {
     return <UserMessage message={message} />;
   }
@@ -67,7 +86,14 @@ function MessageRow({ message, onRetry }: MessageRowProps) {
     // ever lands.
     return <SystemMessage message={message} />;
   }
-  return <AssistantMessage message={message} onRetry={onRetry} />;
+  return (
+    <AssistantMessage
+      message={message}
+      onRetry={onRetry}
+      onResume={onResume}
+      conversationId={conversationId}
+    />
+  );
 }
 
 function UserMessage({ message }: { message: Message }) {
@@ -101,21 +127,53 @@ function SystemMessage({ message }: { message: Message }) {
 type AssistantMessageProps = {
   message: Message;
   onRetry: (failedMessageId: string) => void;
+  onResume?: (messageId: string) => void;
+  conversationId?: string | null;
 };
 
-function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
+function AssistantMessage({
+  message,
+  onRetry,
+  onResume,
+  conversationId,
+}: AssistantMessageProps) {
   const isInterrupted =
     message.status === 'failed' && message.errorCode === 'client_disconnected';
   const isCanceled = message.status === 'canceled';
   const isFailed = message.status === 'failed' && !isInterrupted;
 
+  // Transient "copied" confirmation (bug fix: the copy action gave no
+  // feedback). `copied` flips true on a successful clipboard write and resets
+  // after a short beat so the label/icon return to the idle "copy" state.
+  const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
-    // Best-effort copy. We don't surface success/failure UI today — the
-    // hover action is a quiet utility, not a state-bearing primitive.
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(message.content);
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      return;
     }
+    void navigator.clipboard
+      .writeText(message.content)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {
+        // Clipboard denied (permissions / insecure context) — leave the idle
+        // label; surfacing a failure toast here is out of scope.
+      });
   }, [message.content]);
+
+  // "View trace" deep-links to the operator console's Traces lens filtered to
+  // this conversation. Phase B (the console) is built + deployed, so the old
+  // "available in Phase B" no-op is stale. Disabled only when we have no
+  // conversation id yet (brand-new conversation, no persisted trace).
+  const traceHref = conversationId
+    ? `/console/traces?conversationId=${encodeURIComponent(conversationId)}`
+    : null;
+
+  // Resume is offered on canceled turns (bug fix: no way to continue a
+  // cancelled chat). It asks the model to continue via a fresh turn — true
+  // mid-stream resume isn't built. Only shown when a handler is wired.
+  const canResume = isCanceled && typeof onResume === 'function';
 
   return (
     <>
@@ -144,6 +202,33 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
           className="mono text-[12px] text-warn"
         >
           ⌁ stream interrupted
+        </div>
+      ) : null}
+
+      {/* Resume — re-issues the turn as a continuation so the model picks up
+       *  where a canceled stream stopped. Styled as a clear primary action
+       *  (filled, with a play glyph) so it reads unambiguously as a button. */}
+      {canResume ? (
+        <div className="flex gap-2 pt-1.5">
+          <button
+            type="button"
+            data-testid={`message-resume-${message.id}`}
+            aria-label="Resume"
+            onClick={() => onResume?.(message.id)}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-[7px] bg-chat-ink px-3.5 py-1.5 text-[12.5px] font-semibold text-chat-bg shadow-sm transition-opacity hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-acc focus-visible:ring-offset-1"
+          >
+            {/* Play / continue glyph. */}
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 11 11"
+              aria-hidden="true"
+              fill="currentColor"
+            >
+              <path d="M3 2.2v6.6a.5.5 0 0 0 .77.42l5.2-3.3a.5.5 0 0 0 0-.84L3.77 1.78A.5.5 0 0 0 3 2.2Z" />
+            </svg>
+            Resume
+          </button>
         </div>
       ) : null}
 
@@ -179,65 +264,123 @@ function AssistantMessage({ message, onRetry }: AssistantMessageProps) {
         data-testid={`message-actions-${message.id}`}
         className="flex gap-1.5 pt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
       >
-        <button
-          type="button"
-          data-testid={`message-action-view-trace-${message.id}`}
-          aria-label="View trace"
-          aria-disabled="true"
-          title="View trace (available in Phase B)"
-          className="inline-flex items-center gap-1 rounded-[4px] px-2 py-1 text-[11.5px] text-chat-ink-2 transition-colors hover:bg-chat-hover hover:text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
-          onClick={(e) => e.preventDefault()}
-        >
-          {/* External-link icon. */}
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 11 11"
-            aria-hidden="true"
-            fill="none"
+        {traceHref ? (
+          <a
+            href={traceHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid={`message-action-view-trace-${message.id}`}
+            aria-label="View trace in console (opens in a new tab)"
+            title="View this conversation's traces in the operator console (new tab)"
+            className="inline-flex items-center gap-1 rounded-[4px] px-2 py-1 text-[11.5px] text-chat-ink-2 transition-colors hover:bg-chat-hover hover:text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
           >
-            <path
-              d="M4 2H2v7h7V7M6.5 2H9v2.5M9 2L4.5 6.5"
-              stroke="currentColor"
-              strokeWidth="1"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          view trace
-        </button>
+            {/* External-link icon. */}
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 11 11"
+              aria-hidden="true"
+              fill="none"
+            >
+              <path
+                d="M4 2H2v7h7V7M6.5 2H9v2.5M9 2L4.5 6.5"
+                stroke="currentColor"
+                strokeWidth="1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            view trace
+          </a>
+        ) : (
+          <button
+            type="button"
+            data-testid={`message-action-view-trace-${message.id}`}
+            aria-label="View trace"
+            aria-disabled="true"
+            title="Trace available once the conversation is saved"
+            className="inline-flex cursor-not-allowed items-center gap-1 rounded-[4px] px-2 py-1 text-[11.5px] text-chat-ink-3 opacity-60"
+            onClick={(e) => e.preventDefault()}
+          >
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 11 11"
+              aria-hidden="true"
+              fill="none"
+            >
+              <path
+                d="M4 2H2v7h7V7M6.5 2H9v2.5M9 2L4.5 6.5"
+                stroke="currentColor"
+                strokeWidth="1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            view trace
+          </button>
+        )}
         <button
           type="button"
           data-testid={`message-action-copy-${message.id}`}
-          aria-label="Copy message"
+          aria-label={copied ? 'Copied' : 'Copy message'}
           onClick={handleCopy}
-          className="inline-flex items-center gap-1 rounded-[4px] px-2 py-1 text-[11.5px] text-chat-ink-2 transition-colors hover:bg-chat-hover hover:text-chat-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-acc"
+          className={
+            'inline-flex items-center gap-1 rounded-[4px] px-2 py-1 text-[11.5px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-acc ' +
+            (copied
+              ? 'text-acc'
+              : 'text-chat-ink-2 hover:bg-chat-hover hover:text-chat-ink')
+          }
         >
-          {/* Copy icon. */}
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 11 11"
-            aria-hidden="true"
-            fill="none"
-          >
-            <rect
-              x="3"
-              y="3"
-              width="6.5"
-              height="6.5"
-              rx="1"
-              stroke="currentColor"
-              strokeWidth="1"
-            />
-            <path
-              d="M2 7.5V2a.5.5 0 01.5-.5H7"
-              stroke="currentColor"
-              strokeWidth="1"
-              strokeLinecap="round"
-            />
-          </svg>
-          copy
+          {copied ? (
+            <>
+              {/* Checkmark — confirms the clipboard write landed. */}
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 11 11"
+                aria-hidden="true"
+                fill="none"
+              >
+                <path
+                  d="M2 5.5L4.5 8L9 3"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              copied
+            </>
+          ) : (
+            <>
+              {/* Copy icon. */}
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 11 11"
+                aria-hidden="true"
+                fill="none"
+              >
+                <rect
+                  x="3"
+                  y="3"
+                  width="6.5"
+                  height="6.5"
+                  rx="1"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+                <path
+                  d="M2 7.5V2a.5.5 0 01.5-.5H7"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                  strokeLinecap="round"
+                />
+              </svg>
+              copy
+            </>
+          )}
         </button>
       </div>
     </>

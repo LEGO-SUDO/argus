@@ -37,6 +37,13 @@ export type ProviderCatalogEntry = {
   promptPerMillion: number | null;
   completionPerMillion: number | null;
   contextWindow: number | null;
+  /**
+   * Whether the model is currently usable. The api derives this from the
+   * recent inference log (a model failing repeatedly in the last hour reports
+   * `false`). Optional on the wire for backward-compat: a missing flag is
+   * treated as available, so only an explicit `false` greys the entry out.
+   */
+  available?: boolean;
 };
 
 /** Response body of `GET /api/providers`. */

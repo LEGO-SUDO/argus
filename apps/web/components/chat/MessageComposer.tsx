@@ -25,8 +25,10 @@
 'use client';
 
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
   type FormEvent,
@@ -88,22 +90,41 @@ type MessageComposerProps = {
   pinFallbackNotice?: PinFallbackNotice;
 };
 
+/**
+ * Imperative handle the parent (MessageStream) uses to submit on the
+ * composer's behalf — e.g. a starter-card click. Routing through here (rather
+ * than the parent calling `onSend` directly) means the submit carries the
+ * composer's currently-chosen pin, so a starter respects the picked model
+ * instead of always defaulting to Auto.
+ */
+export type MessageComposerHandle = {
+  /** Submit `text` exactly as if the user typed it and pressed Send — carries
+   *  the active pin and clears the textarea. No-op when disabled or blank. */
+  submitText: (text: string) => void;
+};
+
 const MIN_HEIGHT_PX = 44;
 const MAX_HEIGHT_PX = 220;
 
-export function MessageComposer({
-  disabled,
-  streaming = false,
-  providersConfigured = 1,
-  onSend,
-  onCancel,
-  conversationId = null,
-  catalog,
-  catalogLoading = false,
-  pinnedProvider = null,
-  pinnedModel = null,
-  pinFallbackNotice,
-}: MessageComposerProps) {
+export const MessageComposer = forwardRef<
+  MessageComposerHandle,
+  MessageComposerProps
+>(function MessageComposer(
+  {
+    disabled,
+    streaming = false,
+    providersConfigured = 1,
+    onSend,
+    onCancel,
+    conversationId = null,
+    catalog,
+    catalogLoading = false,
+    pinnedProvider = null,
+    pinnedModel = null,
+    pinFallbackNotice,
+  },
+  ref,
+) {
   const [text, setText] = useState('');
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -248,23 +269,36 @@ export function MessageComposer({
    *  need a handle; instead, the parent passes initial text via a key
    *  swap. Kept here for future use. */
 
-  const submit = useCallback(() => {
-    const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    // First-turn pin (FIX 7): on a brand-new conversation (no id yet) carry
-    // the chosen pin on the send so the gateway honors it for THIS turn and
-    // persists it onto the freshly-minted row. Only a complete pair is sent;
-    // Auto (no pin) sends nothing. For an EXISTING conversation, pin changes
-    // already went via PATCH, so we don't carry it here.
-    const carryPin =
-      conversationId === null &&
-      optimisticPin.provider !== null &&
-      optimisticPin.model !== null
-        ? { provider: optimisticPin.provider, model: optimisticPin.model }
-        : undefined;
-    onSend(trimmed, carryPin);
-    setText('');
-  }, [conversationId, disabled, onSend, optimisticPin, text]);
+  // Shared send path for both the textarea Send and the imperative
+  // `submitText` (starter cards). Carries the active pin so a starter respects
+  // the picked model — see `submitText` below + the handle type.
+  const sendText = useCallback(
+    (raw: string) => {
+      const trimmed = raw.trim();
+      if (!trimmed || disabled) return;
+      // First-turn pin (FIX 7): on a brand-new conversation (no id yet) carry
+      // the chosen pin on the send so the gateway honors it for THIS turn and
+      // persists it onto the freshly-minted row. Only a complete pair is sent;
+      // Auto (no pin) sends nothing. For an EXISTING conversation, pin changes
+      // already went via PATCH, so we don't carry it here.
+      const carryPin =
+        conversationId === null &&
+        optimisticPin.provider !== null &&
+        optimisticPin.model !== null
+          ? { provider: optimisticPin.provider, model: optimisticPin.model }
+          : undefined;
+      onSend(trimmed, carryPin);
+      setText('');
+    },
+    [conversationId, disabled, onSend, optimisticPin],
+  );
+
+  const submit = useCallback(() => sendText(text), [sendText, text]);
+
+  // Expose `submitText` so the parent can submit a starter-card message
+  // THROUGH the composer — preserving the active pin (bug fix: starters used
+  // to bypass the composer and always send Auto).
+  useImperativeHandle(ref, () => ({ submitText: sendText }), [sendText]);
 
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -452,4 +486,4 @@ export function MessageComposer({
       </div>
     </div>
   );
-}
+});

@@ -107,24 +107,45 @@ export function ChatSurface() {
   const [catalogState, setCatalogState] = useState<CatalogState>({
     status: 'idle',
   });
+  // `loadCatalog({ initial })` — the initial mount load flips to loading/error
+  // states; a silent refetch (initial:false) keeps the current catalog visible
+  // and only swaps it on success, so a post-turn refresh never disables the
+  // picker mid-session or flashes the error notice.
+  const loadCatalog = useCallback(
+    (opts?: { initial?: boolean }) => {
+      const initial = opts?.initial ?? false;
+      if (initial) setCatalogState({ status: 'loading' });
+      return fetchProviderCatalog()
+        .then((catalog) => setCatalogState({ status: 'ready', catalog }))
+        .catch(() => {
+          if (initial) setCatalogState({ status: 'error' });
+        });
+    },
+    [],
+  );
   useEffect(() => {
-    let cancelled = false;
-    setCatalogState({ status: 'loading' });
-    void fetchProviderCatalog()
-      .then((catalog) => {
-        if (cancelled) return;
-        setCatalogState({ status: 'ready', catalog });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // Swallow the specific error — the picker just falls back to its
-        // empty-state branch. The inline notice tells the user why.
-        setCatalogState({ status: 'error' });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void loadCatalog({ initial: true });
+  }, [loadCatalog]);
+
+  // Silent refetch after a chat turn settles — provider availability is
+  // log-derived (a model failing repeatedly reads back `available: false`), so
+  // re-pulling the catalog after each turn keeps the picker honest without a
+  // page reload. Debounced via the ref so a burst of turns coalesces.
+  const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleTurnSettled = useCallback(() => {
+    if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+    // Small delay lets the projection consumer enrich the just-failed
+    // inference row (provider/model) before we re-query availability.
+    refetchTimerRef.current = setTimeout(() => {
+      void loadCatalog();
+    }, 2000);
+  }, [loadCatalog]);
+  useEffect(
+    () => () => {
+      if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+    },
+    [],
+  );
 
   // The catalog handed to MessageComposer. On error/loading we pass an empty
   // catalog; the picker distinguishes the two via `catalogLoading` so the
@@ -224,6 +245,7 @@ export function ChatSurface() {
         pinnedProvider={pinnedProvider}
         pinnedModel={pinnedModel}
         pinFallbackNotice={pinFallbackNotice}
+        onTurnSettled={handleTurnSettled}
       />
     </>
   );

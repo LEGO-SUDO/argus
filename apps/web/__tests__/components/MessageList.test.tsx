@@ -147,4 +147,76 @@ describe('MessageList — hover actions', () => {
     await userEvent.click(screen.getByTestId('message-action-copy-m-asst-1'));
     expect(writeText).toHaveBeenCalledWith('**bold** answer');
   });
+
+  // Bug fix: the copy action gave no confirmation. After a successful write
+  // the button surfaces a "copied" state so the user knows it worked.
+  it('shows a "copied" confirmation after a successful copy', async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const messages: Message[] = [assistantMsg({ id: 'm-asst-1', content: 'hi' })];
+    render(<MessageList messages={messages} onRetry={() => undefined} />);
+    const btn = screen.getByTestId('message-action-copy-m-asst-1');
+    expect(btn).toHaveTextContent(/copy/i);
+    expect(btn).not.toHaveTextContent(/copied/i);
+    await userEvent.click(btn);
+    expect(await screen.findByText(/copied/i)).toBeInTheDocument();
+  });
+
+  // Bug fix: "view trace" was a Phase B no-op. It now deep-links into the
+  // operator console's Traces lens filtered to this conversation.
+  it('renders view-trace as a console deep-link when a conversationId is provided', () => {
+    const messages: Message[] = [assistantMsg({ id: 'm-asst-1', content: 'ok' })];
+    render(
+      <MessageList
+        messages={messages}
+        onRetry={() => undefined}
+        conversationId="conv-123"
+      />,
+    );
+    const link = screen.getByTestId('message-action-view-trace-m-asst-1');
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute(
+      'href',
+      '/console/traces?conversationId=conv-123',
+    );
+    // Opens in a new tab (with safe rel).
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+});
+
+describe('MessageList — resume on canceled turns', () => {
+  it('renders a Resume button on a canceled message and calls onResume', async () => {
+    const onResume = jest.fn();
+    const messages: Message[] = [
+      assistantMsg({ id: 'm-asst-1', content: 'partial...', status: 'canceled' }),
+    ];
+    render(
+      <MessageList
+        messages={messages}
+        onRetry={() => undefined}
+        onResume={onResume}
+      />,
+    );
+    const btn = screen.getByTestId('message-resume-m-asst-1');
+    await userEvent.click(btn);
+    expect(onResume).toHaveBeenCalledWith('m-asst-1');
+  });
+
+  it('does NOT render Resume on a completed message', () => {
+    const messages: Message[] = [
+      assistantMsg({ id: 'm-asst-1', content: 'done', status: 'complete' }),
+    ];
+    render(
+      <MessageList
+        messages={messages}
+        onRetry={() => undefined}
+        onResume={() => undefined}
+      />,
+    );
+    expect(screen.queryByTestId('message-resume-m-asst-1')).toBeNull();
+  });
 });

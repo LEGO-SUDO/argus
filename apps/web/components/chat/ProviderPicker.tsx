@@ -158,13 +158,16 @@ export function ProviderPicker({
 
   // Flat option list (in render order) for keyboard navigation + Enter
   // selection. The synthetic Auto option leads the list only when a pin is
-  // active (so the user can switch back to Auto).
+  // active (so the user can switch back to Auto). Unavailable entries are
+  // EXCLUDED here so they're never keyboard-reachable or Enter-selectable;
+  // they still render (greyed, see below) but as presentational rows. The
+  // exclusion keeps this list index-aligned with the rendered option rows.
   const options = useMemo<Option[]>(() => {
     const flat: Option[] = [];
     if (pinIsValid) flat.push({ kind: 'auto' });
     for (const group of groups) {
       for (const entry of group.entries) {
-        flat.push({ kind: 'model', entry });
+        if (isEntryAvailable(entry)) flat.push({ kind: 'model', entry });
       }
     }
     return flat;
@@ -359,6 +362,45 @@ export function ProviderPicker({
               </div>
               <ul role="presentation" className="m-0 list-none p-0">
                 {group.entries.map((entry) => {
+                  // Unavailable entry (recent repeated failures): render a
+                  // greyed, non-interactive row with an "unavailable" pill. It
+                  // is NOT a role=option and is absent from `options`, so it
+                  // can't be focused, Enter-selected, or clicked.
+                  if (!isEntryAvailable(entry)) {
+                    return (
+                      <li
+                        key={`${entry.provider}/${entry.model}`}
+                        // Disabled option per the WAI-ARIA listbox pattern:
+                        // still role=option + aria-disabled (so AT announces
+                        // "dimmed/unavailable"), but tabIndex=-1 and absent
+                        // from `options`, so roving focus + Enter skip it and
+                        // a click is a no-op.
+                        role="option"
+                        aria-disabled="true"
+                        aria-selected={false}
+                        tabIndex={-1}
+                        data-testid={`provider-picker-option-${entry.provider}-${entry.model}`}
+                        data-unavailable="true"
+                        title="Unavailable — this model has been failing recently"
+                        className="flex cursor-not-allowed flex-col gap-0.5 px-3 py-1.5 opacity-50"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="mono text-[12.5px] text-chat-ink-2">
+                            {entry.model}
+                          </span>
+                          <span
+                            data-testid={`provider-picker-unavailable-pill-${entry.provider}-${entry.model}`}
+                            className="rounded-full border border-chat-rule px-1.5 py-[1px] text-[9.5px] font-medium uppercase tracking-wide text-chat-ink-3"
+                          >
+                            unavailable
+                          </span>
+                        </span>
+                        <span className="text-[11px] text-chat-ink-3">
+                          {formatCostPair(entry)}
+                        </span>
+                      </li>
+                    );
+                  }
                   flatIndex += 1;
                   const idx = flatIndex;
                   const selected =
@@ -396,6 +438,12 @@ export function ProviderPicker({
       ) : null}
     </div>
   );
+}
+
+/** An entry is available unless the api explicitly marked it `false`. A
+ *  missing flag (older payloads / fixtures) is treated as available. */
+function isEntryAvailable(entry: ProviderCatalogEntry): boolean {
+  return entry.available !== false;
 }
 
 type ProviderGroup = {
