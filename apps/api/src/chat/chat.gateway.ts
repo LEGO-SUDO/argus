@@ -147,7 +147,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
   async handleConnection(client: ChatClient, req: IncomingMessage): Promise<void> {
     try {
-      const userId = await resolveWsUser(req.headers, this.auth);
+      const userId = await resolveWsUser(req.headers, this.auth, req.url);
       if (!userId) {
         client.close(WS_POLICY_VIOLATION, 'unauthenticated');
         return;

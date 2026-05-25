@@ -61,7 +61,11 @@ describe('/api catch-all proxy route', () => {
     expect(init.headers.get('cookie')).toBe('argus_session=token');
   });
 
-  it('returns a clear 502 when no deployed API origin is configured', async () => {
+  it('falls back to the hardcoded prod API origin when no env var is set', async () => {
+    // With no INTERNAL_API_URL/API_URL/NEXT_PUBLIC_API_URL, production uses the
+    // hardcoded fallback so the proxy keeps working even if Vercel doesn't
+    // surface the env var (the 502 "api_origin_missing" branch is now only
+    // reachable if the hardcoded fallback were ever emptied).
     delete process.env.INTERNAL_API_URL;
     delete process.env.API_URL;
     delete process.env.NEXT_PUBLIC_API_URL;
@@ -71,17 +75,26 @@ describe('/api catch-all proxy route', () => {
       writable: true,
     });
 
+    const fetchMock = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    Object.defineProperty(globalThis, 'fetch', {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
     const res = await POST(
       new Request('https://web.argus.test/api/auth/login', { method: 'POST' }) as never,
       routeContext(['auth', 'login']) as never,
     );
 
-    await expect(res.json()).resolves.toEqual({
-      error: {
-        code: 'api_origin_missing',
-        message: 'Set INTERNAL_API_URL to the deployed API origin.',
-      },
-    });
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(url.toString()).toBe('https://api-argus.duckdns.org/auth/login');
   });
 });

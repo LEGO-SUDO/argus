@@ -16,6 +16,7 @@ import {
   type WsFrameInbound,
   type WsFrameOutbound,
 } from '@argus/contracts';
+import { authFetch } from './auth-fetch';
 
 /**
  * WebSocket.OPEN === 1 per the WHATWG spec. We capture it locally so the
@@ -60,6 +61,33 @@ export function defaultWsUrl(): string {
   }
   // Fallback for SSR / dev — apps/api WS gateway is mounted at /ws/chat.
   return 'ws://localhost:4000/ws/chat';
+}
+
+/**
+ * Build the WS URL with a session ticket appended as `?token=`.
+ *
+ * The chat WS connects DIRECTLY to the api (cross-origin from the web on
+ * Vercel), so the browser can't send the session cookie over the handshake.
+ * We fetch a short ticket from the cookie-authenticated `/api/auth/ws-ticket`
+ * (same-origin via the web's /api proxy) and pass it in the URL; the gateway
+ * accepts `?token=`. Falls back to the bare URL (cookie auth — same-origin/dev)
+ * if no ticket is available.
+ */
+export async function authedWsUrl(): Promise<string> {
+  const base = defaultWsUrl();
+  try {
+    const { token } = await authFetch<{ token: string }>('/api/auth/ws-ticket', {
+      method: 'GET',
+    });
+    if (token) {
+      const sep = base.includes('?') ? '&' : '?';
+      return `${base}${sep}token=${encodeURIComponent(token)}`;
+    }
+  } catch {
+    // Not logged in, or same-origin where the cookie already works — connect
+    // with the bare URL and let the cookie path handle auth.
+  }
+  return base;
 }
 
 export class WsClient {

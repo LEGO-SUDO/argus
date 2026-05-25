@@ -59,6 +59,7 @@ import {
 } from '@/lib/message-stream-reducer';
 import {
   WsClient,
+  authedWsUrl,
   type ErrorHandler,
   type FrameHandler,
   type CloseHandler,
@@ -198,10 +199,7 @@ export function MessageStream({
   const clientRef = useRef<WsClientLike | null>(wsClient ?? null);
 
   useEffect(() => {
-    if (!clientRef.current) {
-      clientRef.current = new WsClient();
-    }
-    const client = clientRef.current;
+    let cancelled = false;
 
     const onFrame: FrameHandler = (frame) => {
       // On the first `start` frame for a brand-new conversation, learn
@@ -248,18 +246,36 @@ export function MessageStream({
       setWsReady(true);
     };
 
-    client.onFrame(onFrame);
-    client.onError(onError);
-    client.onClose(onClose);
-    if (typeof client.onOpen === 'function') {
-      client.onOpen(onOpen);
+    const wire = (client: WsClientLike) => {
+      client.onFrame(onFrame);
+      client.onError(onError);
+      client.onClose(onClose);
+      if (typeof client.onOpen === 'function') {
+        client.onOpen(onOpen);
+      } else {
+        // Test stub without an open hook — treat as already-open.
+        setWsReady(true);
+      }
+    };
+
+    // Injected client (tests) → wire synchronously. Production → resolve the
+    // WS URL with a session ticket (?token=) FIRST, then construct. The fetch
+    // is why construction is async: the chat WS connects cross-origin and can't
+    // rely on the session cookie, so it carries the ticket in the URL.
+    if (clientRef.current) {
+      wire(clientRef.current);
     } else {
-      // Test stub without an open hook — treat as already-open.
-      setWsReady(true);
+      void authedWsUrl().then((url) => {
+        if (cancelled || clientRef.current) return;
+        const client = new WsClient(url);
+        clientRef.current = client;
+        wire(client);
+      });
     }
 
     return () => {
-      client.close();
+      cancelled = true;
+      clientRef.current?.close();
       // Drop the ref on teardown so a StrictMode remount in dev gets a
       // fresh client rather than re-using a closed one.
       clientRef.current = null;
