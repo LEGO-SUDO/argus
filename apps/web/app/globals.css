@@ -432,3 +432,27 @@ kbd {
   max-width: 100%;
   height: auto;
 }
+
+/* ============================================================================
+   iOS Safari auto-zoom guard.
+
+   Mobile Safari zooms into any focused <input>/<textarea>/<select> whose
+   font-size is < 16px, and leaves the page zoomed afterward — which on a phone
+   shows up as the whole layout overflowing with a horizontal scrollbar (the
+   reported bug: tapping the login email/password field, both `text-[14px]`,
+   triggers it). We force 16px on form controls so focus never crosses Safari's
+   zoom threshold.
+
+   Scoped to `pointer: coarse` so the denser desktop sizing (14–15px) is
+   untouched. We deliberately do NOT add a `maximum-scale`/`user-scalable=no`
+   viewport lock — that would also disable pinch-zoom (an accessibility
+   regression). `!important` is required to beat Tailwind's arbitrary
+   `text-[14px]` / `text-[15px]` utilities on the inputs.
+   ============================================================================ */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}

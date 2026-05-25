@@ -43,6 +43,38 @@ describe('useLiveBadge polling (Task 24)', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('does not start a new poll while one is still in flight (no pile-up)', async () => {
+    // A slow poll that never resolves during the window.
+    let resolveFirst!: (v: { state: string; lagSeconds: number }) => void;
+    mockFetch.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveFirst = r;
+      }),
+    );
+    mockFetch.mockResolvedValue({ state: 'live', lagSeconds: 0 });
+    renderHook(() => useLiveBadge({ cadenceMs: 1000 }));
+
+    // Mount poll fired and is still pending.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Advancing well past several cadences must NOT fire more polls — the next
+    // tick is only scheduled once the in-flight one settles (no setInterval).
+    await act(async () => {
+      jest.advanceTimersByTime(5000);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Once it settles, the next poll is scheduled and fires after the cadence.
+    await act(async () => {
+      resolveFirst({ state: 'live', lagSeconds: 0 });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(1000);
+    });
+    await flush();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it('derives behind from a lagging response', async () => {
     mockFetch.mockResolvedValue({ state: 'behind', lagSeconds: 12 });
     const { result } = renderHook(() => useLiveBadge({ cadenceMs: 1000 }));

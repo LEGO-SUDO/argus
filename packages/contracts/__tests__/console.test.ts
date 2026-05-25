@@ -209,7 +209,20 @@ describe('ReplayCandidateSchema + ReplayCandidatesResponseSchema', () => {
 
 describe('ReplayDetailSchema', () => {
   it('round-trips a replay detail row', () => {
-    const detail = { ...VALID_TRACE_ROW, eligibility: 'eligible_with_warning' as const };
+    const detail = {
+      ...VALID_TRACE_ROW,
+      eligibility: 'eligible_with_warning' as const,
+      diff: null,
+    };
+    expect(ReplayDetailSchema.parse(detail)).toEqual(detail);
+  });
+
+  it('round-trips a replay detail row carrying a computed diff', () => {
+    const detail = {
+      ...VALID_TRACE_ROW,
+      eligibility: 'eligible' as const,
+      diff: { changes: [{ value: 'a ' }, { value: 'b', added: true }] },
+    };
     expect(ReplayDetailSchema.parse(detail)).toEqual(detail);
   });
 

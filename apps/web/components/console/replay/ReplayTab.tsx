@@ -18,10 +18,9 @@ import type {
   ProviderAvailabilityResponse,
   ReplayCandidate,
   ReplayDetail as ReplayDetailDto,
-  ReplayRunResponse,
   TimeWindow,
 } from '@argus/contracts';
-import { runReplay } from '@/lib/console-api';
+import { fetchReplayDetail, runReplay } from '@/lib/console-api';
 import { ApiError } from '@/lib/auth-fetch';
 
 import { EmptyState } from '@/components/console/EmptyState';
@@ -39,7 +38,77 @@ export type ReplayTabProps = {
   window: TimeWindow;
 };
 
+// Poll the replay detail until the server has computed the diff (the replay
+// turn streams async, so the diff lands a few seconds after kickoff). The
+// detail's `diff` flips from null → a value once the replay message is
+// terminal. Bounded so a hung/never-finishing replay surfaces as a failure
+// rather than spinning forever.
+const POLL_INTERVAL_MS = 1500;
+// Poll past the server-side replay cap (REPLAY_MAX_DURATION_MS ≈ 45s) so that
+// even a stalled replay — which the server force-cancels at that cap, making
+// the diff computable — resolves here instead of erroring. ~60 × 1.5s ≈ 90s.
+const POLL_MAX_ATTEMPTS = 60;
+// Once the diff lands, latency/tokens/cost come from the (slightly later) async
+// projection. Wait a short grace for them, then show the diff regardless so the
+// output isn't held hostage to telemetry lag.
+const METRICS_GRACE_ATTEMPTS = 2; // ~3s after the diff appears
+// Sustained poll failures mean the api went away mid-replay (restart/crash) —
+// the run is orphaned (its orchestrator died with the process), so fail fast
+// instead of polling a doomed run. A couple of transient blips are tolerated.
+const MAX_CONSECUTIVE_ERRORS = 3;
+
+async function pollReplayDetail(inferenceId: string): Promise<ReplayDetailDto> {
+  let withDiff: ReplayDetailDto | null = null;
+  let attemptsSinceDiff = 0;
+  let consecutiveErrors = 0;
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+    let detail: ReplayDetailDto;
+    try {
+      detail = await fetchReplayDetail(inferenceId);
+      consecutiveErrors = 0;
+    } catch {
+      consecutiveErrors += 1;
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        throw new Error(
+          'Lost connection to the server during the replay — it may have restarted. Run it again.',
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      continue;
+    }
+
+    if (detail.diff !== null) {
+      withDiff = detail;
+      // Have the comparison. Prefer to also have metrics; stop waiting for them
+      // once the grace window elapses.
+      if (detail.latencyMs !== null || attemptsSinceDiff >= METRICS_GRACE_ATTEMPTS) {
+        return detail;
+      }
+      attemptsSinceDiff += 1;
+    } else if (detail.status === 'failed' || detail.status === 'canceled') {
+      // Terminal inference with no computable diff — the run failed or was
+      // interrupted/orphaned (e.g. swept after an api restart). Surface it
+      // rather than waiting out the full window.
+      throw new Error(
+        'Replay did not complete — the run failed or was interrupted. Run it again.',
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+  // No diff after the full window even though the server should have finalized
+  // the turn by its own cap — almost always an interrupted/orphaned run (e.g.
+  // the api restarted mid-stream). Surface a clear, actionable message.
+  if (withDiff) return withDiff;
+  throw new Error(
+    'Replay did not finish — it may have been interrupted. Check Traces or run it again.',
+  );
+}
+
 function toSource(input: ReplayCandidate | ReplayDetailDto): ReplaySource {
+  // ReplayDetail carries output + metrics; a bare candidate does not. Narrow on
+  // a detail-only field so the original column can show output + latency/tokens/
+  // cost upfront when we have them.
+  const isDetail = 'latencyMs' in input;
   return {
     id: input.id,
     provider: input.provider,
@@ -48,6 +117,10 @@ function toSource(input: ReplayCandidate | ReplayDetailDto): ReplaySource {
     inputPreview: input.inputPreview,
     status: input.status,
     outputPreview: 'outputPreview' in input ? input.outputPreview : null,
+    latencyMs: isDetail ? input.latencyMs : undefined,
+    promptTokens: isDetail ? input.promptTokens : undefined,
+    completionTokens: isDetail ? input.completionTokens : undefined,
+    totalCostMicros: isDetail ? input.totalCostMicros : undefined,
   };
 }
 
@@ -59,7 +132,7 @@ export function ReplayTab({ candidates, initialDetail, availability, window }: R
   const [model, setModel] = useState(initialSource?.model ?? '');
   const [mode, setMode] = useState<DiffViewMode>('diff');
   const [runState, setRunState] = useState<ReplayRunState>('idle');
-  const [result, setResult] = useState<ReplayRunResponse | null>(null);
+  const [result, setResult] = useState<ReplayDetailDto | null>(null);
   const [errorKind, setErrorKind] = useState<ReplayFailureKind>('replay_failed');
   const [errorCause, setErrorCause] = useState<string | undefined>(undefined);
 
@@ -71,6 +144,14 @@ export function ReplayTab({ candidates, initialDetail, availability, window }: R
     setMode('diff');
     setRunState('idle');
     setResult(null);
+    // A candidate carries no output/metrics — hydrate the full detail so the
+    // ORIGINAL column shows the existing output + latency/tokens/cost upfront,
+    // before any replay runs. Best-effort; a failure just leaves the previews.
+    void fetchReplayDetail(candidate.id)
+      .then((detail) => {
+        setSource((cur) => (cur && cur.id === detail.id ? toSource(detail) : cur));
+      })
+      .catch(() => undefined);
   };
 
   const resetToOriginal = () => {
@@ -84,12 +165,18 @@ export function ReplayTab({ candidates, initialDetail, availability, window }: R
     setRunState('running');
     setResult(null);
     try {
-      const response = await runReplay({ sourceInferenceId: source.id, provider, model });
-      setResult(response);
+      // The replay streams ASYNCHRONOUSLY — `runReplay` returns the new ids with
+      // a null diff. We then poll the detail endpoint until the replay turn is
+      // terminal and the server has computed the diff (output vs source). This
+      // is the read-path that was previously missing, which is why "Run replay"
+      // appeared to do nothing.
+      const { inferenceId } = await runReplay({ sourceInferenceId: source.id, provider, model });
+      const detail = await pollReplayDetail(inferenceId);
+      setResult(detail);
       setRunState('success');
     } catch (err) {
       // A canceled original has no output to compare; otherwise the replay
-      // itself failed.
+      // itself failed (or timed out before producing output).
       setErrorKind(source.status === 'canceled' ? 'original_canceled' : 'replay_failed');
       setErrorCause(
         err instanceof ApiError || err instanceof Error ? err.message : 'unknown error',

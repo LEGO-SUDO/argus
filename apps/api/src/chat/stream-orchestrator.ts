@@ -185,6 +185,11 @@ export class StreamOrchestrator {
       try {
         await this.chat.failTurn(this.input.messageId, this.partialContent, code);
       } catch (dbErr) {
+        StreamOrchestrator.logger.error(
+          `failTurn failed messageId=${this.input.messageId}: ${
+            errorMessageOf(dbErr) ?? 'unknown'
+          } — message left in streaming`,
+        );
         captureApiError({
           err: dbErr,
           feature: 'chat',
@@ -192,6 +197,11 @@ export class StreamOrchestrator {
           extra: { stage: 'failTurn-after-sdk-error', messageId: this.input.messageId },
         });
       }
+      // The SDK stream error itself — log it visibly too (Sentry is a no-op
+      // locally), since this is the provider-side reason a replay failed.
+      StreamOrchestrator.logger.warn(
+        `sdk stream error messageId=${this.input.messageId} code=${code}: ${errorMessageOf(err) ?? 'unknown'}`,
+      );
       captureApiError({
         err,
         feature: 'chat',
@@ -208,7 +218,20 @@ export class StreamOrchestrator {
     this.terminal = 'complete';
     try {
       await this.chat.completeTurn(this.input.messageId, this.partialContent);
+      StreamOrchestrator.logger.debug(
+        `completeTurn ok messageId=${this.input.messageId} contentLen=${this.partialContent.length}`,
+      );
     } catch (err) {
+      // VISIBLE log in addition to Sentry: this catch used to be Sentry-only,
+      // which is a no-op without SENTRY_DSN. A swallowed failure here leaves the
+      // message stuck in `streaming` even though the turn finished — which
+      // silently strands the Replay diff (it gates on the message being
+      // terminal) and any reader that trusts `messages.status`.
+      StreamOrchestrator.logger.error(
+        `completeTurn failed messageId=${this.input.messageId} contentLen=${this.partialContent.length}: ${
+          errorMessageOf(err) ?? 'unknown'
+        } — message left in streaming`,
+      );
       captureApiError({
         err,
         feature: 'chat',
@@ -286,6 +309,11 @@ export class StreamOrchestrator {
     try {
       await this.chat.cancelTurn(this.input.messageId, this.partialContent);
     } catch (err) {
+      StreamOrchestrator.logger.error(
+        `cancelTurn failed messageId=${this.input.messageId}: ${
+          errorMessageOf(err) ?? 'unknown'
+        } — message left in streaming`,
+      );
       captureApiError({
         err,
         feature: 'chat',

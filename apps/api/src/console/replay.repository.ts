@@ -5,11 +5,19 @@
 // full metadata for one source, including the captured error_code on failed
 // sources. Both are user-scoped; detail returns null cross-user (controller →
 // 404). Writes happen via ReplayService/ChatService, not here.
-import { Injectable } from '@nestjs/common';
-import type { TimeWindow, ReplayCandidate, ReplayDetail, InferenceStatus } from '@argus/contracts';
+import { Injectable, Logger } from '@nestjs/common';
+import type {
+  TimeWindow,
+  ReplayCandidate,
+  ReplayDetail,
+  InferenceStatus,
+  DiffResult,
+} from '@argus/contracts';
 import { PrismaService } from '../common/prisma.service';
 import { Clock } from '../common/clock';
+import { config } from '../common/config';
 import { replayEligibility } from '../replay/replay-eligibility';
+import { computeDiff } from '../replay/diff';
 
 const DEFAULT_LIMIT = 50;
 const HOUR_MS = 3_600_000;
@@ -35,6 +43,7 @@ interface InfRow {
   outputPreview: string | null;
   errorCode: string | null;
   sampleWorkspaceId: string | null;
+  replayOfInferenceId: string | null;
 }
 
 export interface CandidatesInput {
@@ -64,6 +73,8 @@ function decodeCursor(cursor: string): { startedAt: Date; id: string } | null {
 
 @Injectable()
 export class ReplayRepository {
+  private readonly logger = new Logger(ReplayRepository.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly clock: Clock,
@@ -125,6 +136,11 @@ export class ReplayRepository {
     const titles = await this.titleMap(input.userId);
     const traceId = await this.resolveTraceId(r.messageId, r.traceId);
     const priced = r.promptCostUsdMicros !== null || r.completionCostUsdMicros !== null;
+    // Output-preview fallback: when projection never populated the column,
+    // derive a preview from the persisted message content so the Replay
+    // ORIGINAL/REPLAY pane shows output immediately (not just after a diff).
+    const outputPreview =
+      r.outputPreview ?? (await this.outputPreviewFromMessage(r.messageId, input.userId));
     return {
       id: r.id,
       traceId,
@@ -143,10 +159,75 @@ export class ReplayRepository {
       completionCostMicros: r.completionCostUsdMicros,
       totalCostMicros: priced ? (r.promptCostUsdMicros ?? 0) + (r.completionCostUsdMicros ?? 0) : null,
       inputPreview: r.inputPreview,
-      outputPreview: r.outputPreview,
+      outputPreview,
       errorCode: r.errorCode,
       eligibility: replayEligibility(r.status),
+      diff: await this.computeReplayDiff(r, input.userId),
     };
+  }
+
+  // Derive an output preview from the message content (trimmed + capped to the
+  // 500-char preview convention). Returns null when there's no usable content.
+  private async outputPreviewFromMessage(
+    messageId: string,
+    userId: string,
+  ): Promise<string | null> {
+    const msg = (await this.prisma.db.message.findFirst({
+      where: { id: messageId, userId },
+    })) as unknown as { content?: string | null } | null;
+    const content = msg?.content?.trim();
+    if (!content) return null;
+    return content.length > 500 ? content.slice(0, 500) : content;
+  }
+
+  // Word-level diff of a terminal replay row's output vs its source's output.
+  // This is the read-path that actually surfaces the replay comparison: the
+  // run streams asynchronously (ReplayService returns no diff), so the UI polls
+  // detail until the replay row is terminal and reads the diff from here.
+  // Returns null for non-replay rows, in-flight replays, or when either side's
+  // message content is missing.
+  private async computeReplayDiff(r: InfRow, userId: string): Promise<DiffResult | null> {
+    if (r.kind !== 'replay') return null;
+    if (!r.replayOfInferenceId) {
+      this.logger.warn(`replay.diff.null id=${r.id} reason=no_replayOfInferenceId`);
+      return null;
+    }
+    const source = (await this.prisma.db.inference.findFirst({
+      where: { id: r.replayOfInferenceId, userId },
+    })) as unknown as { messageId: string } | null;
+    if (!source) {
+      this.logger.warn(`replay.diff.null id=${r.id} reason=source_inference_not_found`);
+      return null;
+    }
+    const [replayMsg, sourceMsg] = (await Promise.all([
+      this.prisma.db.message.findFirst({ where: { id: r.messageId, userId } }),
+      this.prisma.db.message.findFirst({ where: { id: source.messageId, userId } }),
+    ])) as unknown as [
+      { content: string; status: string } | null,
+      { content: string } | null,
+    ];
+    // A missing message row is anomalous (the replay should have created its
+    // own, and the source's must exist) — worth a warn. A still-`streaming`
+    // replay message is the NORMAL in-progress case (the console polls until it
+    // finalizes), so we stay quiet there to avoid one warn per poll.
+    if (!replayMsg || !sourceMsg) {
+      this.logger.warn(
+        `replay.diff.null id=${r.id} reason=message_missing replayMsg=${replayMsg ? 'present' : 'missing'} sourceMsg=${sourceMsg ? 'present' : 'missing'}`,
+      );
+      return null;
+    }
+    // Gate on the replay MESSAGE being terminal (written synchronously when the
+    // turn ends) rather than the inference status (set later by async
+    // projection) — so the diff is available as soon as output lands.
+    if (replayMsg.status === 'streaming') {
+      this.logger.debug(`replay.detail.poll id=${r.id} msgStatus=streaming diff=null`);
+      return null;
+    }
+    const diff = computeDiff(sourceMsg.content, replayMsg.content, config.replayOutputSizeCapBytes);
+    this.logger.debug(
+      `replay.detail.poll id=${r.id} msgStatus=${replayMsg.status} diff=${'changes' in diff ? `${diff.changes.length}changes` : 'tooLarge'}`,
+    );
+    return diff;
   }
 
   private async titleMap(userId: string): Promise<Map<string, string>> {
