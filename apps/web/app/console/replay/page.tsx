@@ -1,6 +1,6 @@
 // /console/replay — server page (LLD Task 174).
 //
-// Awaits searchParams, reads the optional ?source=<inferenceId> + window. With
+// Awaits searchParams, reads the optional ?sourceId=<inferenceId> + window. With
 // a source it fetches the replay detail; otherwise it fetches the candidate
 // list. The provider/model catalog is always fetched (the picker reads its
 // models from the availability snapshot — never hardcoded). All initial
@@ -34,7 +34,11 @@ export default async function ReplayPage({
   const params = recordToSearchParams(await searchParams);
   const parsedWindow = TimeWindowSchema.safeParse(params.get('window'));
   const window: TimeWindow = parsedWindow.success ? parsedWindow.data : '24h';
-  const source = params.get('source') ?? undefined;
+  // The trace-drawer deep link uses ?sourceId=<id> (TraceDrawer.handleReplay);
+  // accept legacy ?source= as a fallback. Either pre-selects the comparison
+  // view server-side so a click-through OR a refresh lands on the source, not
+  // the candidate picker.
+  const source = params.get('sourceId') ?? params.get('source') ?? undefined;
   const cookieHeader = await sessionCookieHeader();
 
   let availability = EMPTY_AVAILABILITY;

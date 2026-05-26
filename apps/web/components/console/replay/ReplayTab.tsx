@@ -32,7 +32,7 @@ import type { ReplayFailureKind } from './ReplayErrorMessage';
 
 export type ReplayTabProps = {
   candidates: ReplayCandidate[];
-  /** Present when the page was opened with ?source=<inferenceId>. */
+  /** Present when the page was opened with ?sourceId=<inferenceId>. */
   initialDetail?: ReplayDetailDto;
   availability: ProviderAvailabilityResponse;
   window: TimeWindow;
