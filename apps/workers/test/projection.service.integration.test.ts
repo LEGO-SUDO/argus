@@ -84,6 +84,12 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     conversationId: string;
     provider: string;
     status: 'streaming' | 'failed';
+    // Phase B identity columns — set by the API gateway's startTurn in
+    // production. Optional here; omitted → a plain chat placeholder (DB default
+    // kind=chat, null FKs).
+    kind?: 'chat' | 'replay' | 'sample' | 'classifier' | 'heartbeat';
+    sampleWorkspaceId?: string;
+    replayOfInferenceId?: string;
   }): Promise<string> {
     const id = randomUUID();
     await env.prisma.inference.create({
@@ -96,6 +102,9 @@ describeIntegration('ProjectionService.handle (integration)', () => {
         model: 'gpt-4o-mini',
         status: args.status,
         startedAt: new Date(),
+        ...(args.kind ? { kind: args.kind } : {}),
+        ...(args.sampleWorkspaceId ? { sampleWorkspaceId: args.sampleWorkspaceId } : {}),
+        ...(args.replayOfInferenceId ? { replayOfInferenceId: args.replayOfInferenceId } : {}),
       },
     });
     return id;
@@ -589,14 +598,17 @@ describeIntegration('ProjectionService.handle (integration)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Task 35: Phase B write payload — a sample span persists kind=sample +
-  // sample_workspace_id; a chat span on the SAME code path persists kind=chat
-  // + null FK (HLD D5 "no parallel write code").
+  // Task 35 [updated for the projection-clobber fix]: the Phase B identity
+  // columns (kind + control-plane FKs) are owned by the gateway's startTurn
+  // placeholder. update-in-place PRESERVES them and must NOT overwrite them
+  // from the span — while still enriching telemetry on the same write.
+  // (HLD D5 "no parallel write code" holds: one path, identity gateway-owned.)
   // -------------------------------------------------------------------------
-  it('persists the Phase B columns: sample span (kind+FK) and chat span (default) via the same path', async () => {
+  it('preserves the gateway-set Phase B identity columns on update-in-place (sample kind+FK)', async () => {
     const { userId, conversationId } = await seedUserAndConversation();
     const ws = await env.prisma.sampleWorkspace.create({ data: { userId } });
 
+    // Gateway created the placeholder as a sample inference (kind + FK set).
     const sampleMsg = randomUUID();
     await seedPlaceholderInference({
       messageId: sampleMsg,
@@ -604,7 +616,11 @@ describeIntegration('ProjectionService.handle (integration)', () => {
       conversationId,
       provider: 'openai',
       status: 'streaming',
+      kind: 'sample',
+      sampleWorkspaceId: ws.id,
     });
+    // Span enriches telemetry. Even when it ALSO carries llm.kind=sample, the
+    // identity is the placeholder's — not re-derived from the span.
     await service.handle(
       makeSpan({
         messageId: sampleMsg,
@@ -616,7 +632,11 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     const sampleRow = await env.prisma.inference.findFirst({ where: { messageId: sampleMsg } });
     expect(sampleRow?.kind).toBe('sample');
     expect(sampleRow?.sampleWorkspaceId).toBe(ws.id);
+    // Telemetry WAS enriched on the same update.
+    expect(sampleRow?.promptTokens).toBe(100);
+    expect(sampleRow?.status).toBe('ok');
 
+    // A chat placeholder + chat span stays kind=chat with a null FK.
     const chatMsg = randomUUID();
     await seedPlaceholderInference({
       messageId: chatMsg,
@@ -629,6 +649,55 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     const chatRow = await env.prisma.inference.findFirst({ where: { messageId: chatMsg } });
     expect(chatRow?.kind).toBe('chat');
     expect(chatRow?.sampleWorkspaceId).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // [regression] Projection-clobber fix (the live bug, 2026-05-26): a replay
+  // placeholder (kind=replay + replayOfInferenceId, set by startTurn) reuses
+  // the chat SDK path, so its span carries NO llm.kind / llm.replay_of_inference_id.
+  // update-in-place must enrich telemetry WITHOUT resetting kind->chat or
+  // nulling the replay FK — otherwise computeReplayDiff returns not_a_replay_row
+  // and the Replay diff never surfaces (it raced the UI poll).
+  // -------------------------------------------------------------------------
+  it('preserves kind=replay + replayOfInferenceId on update-in-place when the span omits Phase B attrs', async () => {
+    const { userId, conversationId } = await seedUserAndConversation();
+
+    // The source (original) inference the replay points back to.
+    const sourceMsg = randomUUID();
+    const sourceInferenceId = await seedPlaceholderInference({
+      messageId: sourceMsg,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+    });
+
+    // The replay placeholder, exactly as startTurn creates it.
+    const replayMsg = randomUUID();
+    const replayInferenceId = await seedPlaceholderInference({
+      messageId: replayMsg,
+      userId,
+      conversationId,
+      provider: 'openai',
+      status: 'streaming',
+      kind: 'replay',
+      replayOfInferenceId: sourceInferenceId,
+    });
+
+    // The replay's span — produced by the shared chat SDK path — carries NO
+    // llm.kind and NO llm.replay_of_inference_id (the real-wire shape that
+    // triggered the clobber).
+    await service.handle(makeSpan({ messageId: replayMsg, conversationId, userId }));
+
+    const row = await env.prisma.inference.findUnique({ where: { id: replayInferenceId } });
+    // Identity preserved (the fix):
+    expect(row?.kind).toBe('replay');
+    expect(row?.replayOfInferenceId).toBe(sourceInferenceId);
+    // Telemetry still enriched on the same update:
+    expect(row?.promptTokens).toBe(100);
+    expect(row?.completionTokens).toBe(50);
+    expect(row?.status).toBe('ok');
+    expect(row?.traceId).not.toBeNull();
   });
 
   // -------------------------------------------------------------------------

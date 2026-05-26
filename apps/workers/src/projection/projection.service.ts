@@ -192,11 +192,24 @@ export class ProjectionService {
               traceId: projection.inference.traceId,
               spanId: projection.inference.spanId,
               errorCode: projection.inference.errorCode,
-              // Phase B columns — written unconditionally from the mapper verdict.
-              kind: projection.inference.kind,
-              classifierForMessageId: projection.inference.classifierForMessageId,
-              replayOfInferenceId: projection.inference.replayOfInferenceId,
-              sampleWorkspaceId: projection.inference.sampleWorkspaceId,
+              // Phase B identity columns (kind + the control-plane FKs) are
+              // DELIBERATELY NOT written on update-in-place. They are owned
+              // authoritatively by the API gateway's startTurn placeholder
+              // (outbox pattern); the OTel span is the source of truth for
+              // TELEMETRY only (provider/model/tokens/cost/latency/trace/
+              // previews/status), never for identity.
+              //
+              // Writing them here previously CLOBBERED correct values: a replay
+              // turn reuses the chat StreamOrchestrator/SDK path, so its span
+              // carries no `llm.kind` / `llm.replay_of_inference_id`. The mapper
+              // then defaults kind -> 'chat' (span-mapper resolveKind) and the
+              // FK -> null (optFk), and this update reset the placeholder's
+              // kind=replay -> chat + nulled replayOfInferenceId ~1s after
+              // completeTurn. That broke the Replay diff read-path
+              // (computeReplayDiff -> not_a_replay_row) as a race against the
+              // UI poll, and mis-filed the row as a chat candidate. The insert-*
+              // branches below DO write these columns: there is no placeholder
+              // to trust there, so the span is the only (best-effort) source.
             },
           });
           return;
