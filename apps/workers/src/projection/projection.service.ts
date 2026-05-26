@@ -157,11 +157,17 @@ export class ProjectionService {
       }
 
       // ---- 3. Inference write inside a transaction ----
+      // The kind we publish on the live-events tick (step 4). Defaults to the
+      // span-derived kind (what the insert-* branches write to a new row). On
+      // update-in-place it is overwritten with the EXISTING row's gateway-owned
+      // kind: a replay span carries no `llm.kind`, so the mapper's 'chat'
+      // default would otherwise mislabel a replay tick as a chat in the feed.
+      let publishKind = projection.inference.kind;
       await this.prisma.$transaction(async (tx) => {
         const existingRaw = await tx.inference.findMany({
           where: { messageId: projection.inference.messageId },
           orderBy: { startedAt: 'desc' },
-          select: { id: true, provider: true, status: true, startedAt: true },
+          select: { id: true, provider: true, status: true, startedAt: true, kind: true },
         });
         const existing: ExistingInferenceRow[] = existingRaw.map((r) => ({
           id: r.id,
@@ -175,6 +181,10 @@ export class ProjectionService {
         });
 
         if (verdict.kind === 'update-in-place') {
+          // Identity (incl. kind) is gateway-owned and preserved below — publish
+          // the target row's actual kind, not the span-derived default.
+          publishKind =
+            existingRaw.find((r) => r.id === verdict.targetRowId)?.kind ?? publishKind;
           await tx.inference.update({
             where: { id: verdict.targetRowId },
             data: {
@@ -273,7 +283,7 @@ export class ProjectionService {
       // tick (Sentry recoverable=yes), it never rolls back the committed write.
       await this.publisher.publish({
         user_id: projection.inference.userId,
-        kind: projection.inference.kind,
+        kind: publishKind,
         conversation_id: projection.inference.conversationId,
       });
     } catch (err) {

@@ -698,6 +698,14 @@ describeIntegration('ProjectionService.handle (integration)', () => {
     expect(row?.completionTokens).toBe(50);
     expect(row?.status).toBe('ok');
     expect(row?.traceId).not.toBeNull();
+
+    // The live-events tick must label the replay by its gateway-owned kind, not
+    // the span-derived 'chat' default (the cosmetic live-feed mislabel).
+    expect(publishSpy).toHaveBeenCalledWith({
+      user_id: userId,
+      kind: 'replay',
+      conversation_id: conversationId,
+    });
   });
 
   // -------------------------------------------------------------------------
